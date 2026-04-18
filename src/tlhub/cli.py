@@ -12,12 +12,19 @@ import sys
 import time
 from typing import Sequence
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 import uuid
 import webbrowser
 
 from tlhub import __version__
-from tlhub.config import DEFAULT_HOST, DEFAULT_PORT, ensure_layout, get_paths
+from tlhub.config import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    build_user_url,
+    ensure_layout,
+    get_paths,
+)
 from tlhub.database import Repository, RunCreate
 from tlhub.server import run_daemon
 from tlhub.trace_parser import ParseResult, ingest_trace_dir
@@ -56,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tlhub",
         description=(
             "Wrap a command with TORCH_TRACE capture and keep a local browser-based trace hub. "
-            "Use `tlhub --stop` to stop the background daemon."
+            "Use `tlhub --stop` to stop the background daemon. "
+            "Set BASE_URL to rewrite printed and opened URLs when running behind a proxy."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -139,7 +147,7 @@ def run_wrapped_command(command: list[str], *, preferred_port: int) -> int:
         if len(parse_result.warnings) > 20:
             print(f"  ... {len(parse_result.warnings) - 20} more", file=sys.stderr)
 
-    run_url = f"{base_url}/runs/{run_id}"
+    run_url = build_public_url(base_url, f"/runs/{run_id}")
     print(
         "tlhub: indexed "
         f"{len(parse_result.artifacts)} artifacts from {len(parse_result.log_files)} log files"
@@ -168,13 +176,18 @@ def safe_ingest(run_id: str, trace_dir: Path, artifacts_dir: Path) -> ParseResul
 
 def ensure_daemon_running(paths, *, preferred_port: int) -> str:
     running, url = daemon_status(paths)
-    if running and url:
-        return url
+    if running and url and daemon_version_matches(paths):
+        return build_public_url(url)
+
+    pid = running_daemon_pid(paths)
+    if pid is not None:
+        if not stop_daemon(paths):
+            fail("failed to restart existing tlhub daemon; try `tlhub --stop` and retry")
 
     url = start_daemon(paths, preferred_port=preferred_port)
     if url is None:
         fail("failed to start tlhub daemon; check the daemon log for details")
-    return url
+    return build_public_url(url)
 
 
 def start_daemon(paths, *, preferred_port: int) -> str | None:
@@ -259,7 +272,11 @@ def cleanup_stale_daemon_files(paths) -> None:
     pid = read_int(paths.daemon_pid_path)
     if pid is not None and process_exists(pid):
         return
-    for path in (paths.daemon_pid_path, paths.daemon_port_path):
+    for path in (
+        paths.daemon_pid_path,
+        paths.daemon_port_path,
+        paths.daemon_version_path,
+    ):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -289,6 +306,25 @@ def read_int(path: Path) -> int | None:
         return None
 
 
+def read_text(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return value or None
+
+
+def daemon_version_matches(paths) -> bool:
+    return read_text(paths.daemon_version_path) == __version__
+
+
+def running_daemon_pid(paths) -> int | None:
+    pid = read_int(paths.daemon_pid_path)
+    if pid is None or not process_exists(pid):
+        return None
+    return pid
+
+
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -296,6 +332,16 @@ def iso_now() -> str:
 def new_run_id() -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def build_public_url(base_url: str, path: str = "") -> str:
+    split = urlsplit(base_url)
+    if split.port is None:
+        fail(f"invalid daemon URL: {base_url}")
+    try:
+        return build_user_url(split.port, path)
+    except ValueError as error:
+        fail(str(error))
 
 
 def fail(message: str) -> None:

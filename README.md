@@ -52,6 +52,16 @@ tlhub --stop
 
 There are no user-facing subcommands. Run deletion and cross-run comparison happen in the web UI.
 
+If you are tunneling or reverse-proxying the local daemon, set `BASE_URL` to rewrite the
+printed and browser-opened URLs while keeping the server bound to `127.0.0.1`:
+
+```bash
+BASE_URL=https://proxy.example.com/reviewer?via=ssh tlhub python train.py
+```
+
+`tlhub` will substitute the runtime port into that URL. The web UI also preserves the
+configured path prefix and query string across links, forms, and redirects.
+
 ## Viewer parity targets
 
 The viewer now exposes the main `tlparse` surfaces in `tlhub` form:
@@ -132,6 +142,8 @@ For graph-like text artifacts, the viewer records lightweight summaries such as 
 The daemon is local-only and binds to `127.0.0.1`.
 
 Every normal `tlhub` invocation checks whether the daemon is already up and starts it automatically when needed. `tlhub --stop` is the only normal daemon-management command.
+
+`tlhub` is also upgrade-aware: the daemon records the package version it was started from, and a newer `tlhub` client will automatically stop and replace an older daemon on the next invocation.
 
 ## Tests
 

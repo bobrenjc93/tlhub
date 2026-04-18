@@ -7,16 +7,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import threading
 from typing import Any
+from datetime import datetime
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
-from tlhub.config import DEFAULT_HOST, TLHubPaths, ensure_layout
+from tlhub import __version__
+from tlhub.config import (
+    DEFAULT_HOST,
+    TLHubPaths,
+    build_app_url,
+    ensure_layout,
+    strip_app_path_prefix,
+)
 from tlhub.database import Repository
 from tlhub.view_helpers import (
-    build_fx_graph_diff,
     build_json_diff,
     build_provenance_groups,
     build_provenance_line_mappings,
@@ -63,8 +71,22 @@ header.shell {
 .title {
   display: flex;
   justify-content: space-between;
-  align-items: end;
+  align-items: flex-start;
   gap: 1rem;
+}
+.title > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.title .actions {
+  flex: 0 0 auto;
+  margin-top: 0.35rem;
+}
+.title h1 {
+  overflow-wrap: anywhere;
+}
+.title p {
+  overflow-wrap: anywhere;
 }
 .title h1 {
   margin: 0;
@@ -106,23 +128,29 @@ main {
   gap: 0.75rem;
 }
 .kpi {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 0.3rem;
+  min-height: 4.4rem;
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 0.8rem 0.9rem;
+  padding: 0.7rem 0.9rem;
   background: rgba(255, 255, 255, 0.55);
 }
 .kpi .label {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 .kpi .value {
   display: block;
-  margin-top: 0.25rem;
-  font-size: 1rem;
+  font-size: 0.98rem;
   font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 table.data, table.source {
   width: 100%;
@@ -146,34 +174,160 @@ table.data th {
   letter-spacing: 0.08em;
 }
 table.source {
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  overflow: hidden;
+  width: 100%;
+  border-collapse: collapse;
   background: #fffdf9;
+  font-size: 0.88rem;
+  line-height: 1.55;
 }
 table.source td.ln {
   width: 1%;
+  min-width: 3.2rem;
+  padding: 0 0.75rem 0 0.6rem;
   white-space: nowrap;
   text-align: right;
   color: var(--muted);
-  background: rgba(191, 153, 121, 0.13);
+  background: rgba(191, 153, 121, 0.08);
+  border-right: 1px solid var(--line);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
 }
 table.source td.ln a {
   color: inherit;
   text-decoration: none;
+  opacity: 0.7;
 }
 table.source td.ln a:hover {
+  opacity: 1;
   text-decoration: underline;
 }
 table.source td.code {
-  width: 99%;
-  overflow-x: auto;
+  width: auto;
+  padding: 0 0.9rem;
 }
 table.source code {
   white-space: pre;
+  font-family: var(--mono);
+  font-size: 0.88rem;
+}
+table.source tr:hover td.ln {
+  background: rgba(191, 153, 121, 0.16);
+  color: var(--text);
+}
+table.source tr:hover td.ln a {
+  opacity: 1;
 }
 table.source tr:target td {
   background: rgba(182, 84, 31, 0.12);
+}
+.hl-keyword { color: #b6541f; font-weight: 600; }
+.hl-const { color: #8f2f1d; font-weight: 600; }
+.hl-builtin { color: #6b3f8d; }
+.hl-func { color: #265c43; }
+.hl-string { color: #2f6a4f; }
+.hl-number { color: #996d00; }
+.hl-comment { color: #8a7565; font-style: italic; }
+.hl-op { color: #8a7565; }
+.hl-decor { color: #6b3f8d; font-style: italic; }
+.hl-fxname { color: #b6541f; }
+.hl-punct { color: #8a7565; }
+.lang-chip {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(182, 84, 31, 0.13);
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.artifact-content-panel {
+  padding: 0;
+  overflow: hidden;
+}
+.artifact-content-panel .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+}
+.artifact-content-panel .panel-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-family: var(--mono);
+  letter-spacing: -0.01em;
+  word-break: break-all;
+}
+.artifact-content-panel .panel-head-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+.source-scroll {
+  max-height: min(72vh, 56rem);
+  overflow: auto;
+}
+.source-scroll table.source {
+  margin: 0;
+}
+.copy-btn {
+  padding: 0.38rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, #fff9ef, #f2e4d6);
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.copy-btn:hover {
+  border-color: rgba(182, 84, 31, 0.4);
+  box-shadow: 0 6px 14px rgba(73, 45, 20, 0.06);
+  transform: translateY(-1px);
+}
+.copy-btn.copied {
+  color: var(--ok);
+  border-color: rgba(38, 92, 67, 0.45);
+}
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.artifact-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.6rem 0 0;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow: hidden;
+}
+.artifact-breadcrumb .sep {
+  opacity: 0.5;
+}
+.artifact-breadcrumb .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
 }
 .pill {
   display: inline-flex;
@@ -225,6 +379,25 @@ button.danger {
   align-items: center;
   flex-wrap: wrap;
 }
+.actions > a {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  background: linear-gradient(180deg, #fff9ef, #f2e4d6);
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.1;
+  text-decoration: none;
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.actions > a:hover {
+  text-decoration: none;
+  border-color: rgba(182, 84, 31, 0.38);
+  box-shadow: 0 8px 18px rgba(73, 45, 20, 0.08);
+  transform: translateY(-1px);
+}
 .summary-list {
   display: grid;
   gap: 0.35rem;
@@ -240,6 +413,49 @@ button.danger {
 .summary-list div:first-child {
   border-top: none;
   padding-top: 0;
+}
+.summary-list .mono {
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.command-block {
+  margin-top: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.command-block > summary {
+  cursor: pointer;
+  padding: 0.55rem 0.85rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  list-style: none;
+}
+.command-block > summary::-webkit-details-marker { display: none; }
+.command-block > summary::before {
+  content: "\u25B8  ";
+  display: inline-block;
+  transition: transform 120ms ease;
+}
+.command-block[open] > summary::before {
+  content: "\u25BE  ";
+}
+.command-pre {
+  margin: 0;
+  padding: 0.7rem 0.85rem 0.9rem;
+  border-top: 1px solid var(--line);
+  background: #fffdf9;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 14rem;
+  overflow: auto;
 }
 .stack-tree {
   font-family: var(--mono);
@@ -262,6 +478,95 @@ button.danger {
 .status-empty { background: rgba(111, 90, 71, 0.12); color: var(--muted); }
 .status-error { background: rgba(143, 47, 29, 0.14); color: var(--bad); }
 .status-missing { background: rgba(111, 90, 71, 0.12); color: var(--muted); }
+.stack-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.9rem;
+}
+.ir-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+.ir-compile {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.75rem 0.9rem;
+  background: rgba(255, 255, 255, 0.55);
+}
+.ir-compile-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.45rem;
+}
+.ir-compile-id {
+  text-decoration: none;
+  font-family: var(--mono);
+}
+.ir-compile-id:hover {
+  text-decoration: underline;
+}
+.ir-artifacts {
+  margin: 0;
+  padding-left: 1rem;
+}
+.ir-artifacts li {
+  margin: 0.2rem 0;
+  font-family: var(--mono);
+  font-size: 0.88rem;
+}
+.section-jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.3rem;
+}
+.section-jumps a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.6);
+  color: var(--text);
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+.section-jumps a:hover {
+  text-decoration: none;
+  border-color: rgba(182, 84, 31, 0.38);
+}
+.section-jumps .count {
+  color: var(--muted);
+}
+details.collapsed-panel {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.55);
+  padding: 0.2rem 0.4rem;
+}
+details.collapsed-panel > summary {
+  cursor: pointer;
+  padding: 0.6rem 0.7rem;
+  font-weight: 600;
+  list-style: none;
+}
+details.collapsed-panel > summary::-webkit-details-marker { display: none; }
+details.collapsed-panel > summary::before {
+  content: "\u25B8  ";
+  color: var(--muted);
+}
+details.collapsed-panel[open] > summary::before {
+  content: "\u25BE  ";
+}
+details.collapsed-panel > .collapsed-body {
+  padding: 0.2rem 0.5rem 0.6rem;
+}
 .mono-list {
   margin: 0;
   padding-left: 1.1rem;
@@ -307,27 +612,77 @@ button.danger {
   font-size: 0.84rem;
   color: var(--muted);
 }
-.diff-wrap {
-  overflow-x: auto;
+.sxs-wrap {
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 14px;
+  overflow: hidden;
   background: #fffdf9;
 }
-.diff {
+.sxs-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--line);
+  background: rgba(191, 153, 121, 0.08);
+}
+.sxs-head-cell {
+  padding: 0.55rem 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sxs-head-cell + .sxs-head-cell { border-left: 1px solid var(--line); }
+.sxs-diff {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-family: var(--mono);
-  font-size: 0.88rem;
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
-.diff td, .diff th {
-  padding: 0.25rem 0.45rem;
+.sxs-diff colgroup col.ln { width: 3rem; }
+.sxs-diff td { vertical-align: top; }
+.sxs-diff td.sxs-ln {
+  width: 3rem;
+  padding: 0.12rem 0.55rem;
+  color: var(--muted);
+  text-align: right;
+  background: rgba(191, 153, 121, 0.08);
+  border-right: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  white-space: nowrap;
 }
-.diff_header {
-  background: rgba(191, 153, 121, 0.15);
+.sxs-diff td.sxs-text {
+  padding: 0.14rem 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
-.diff_add { background: rgba(38, 92, 67, 0.12); }
-.diff_sub { background: rgba(143, 47, 29, 0.12); }
-.diff_chg { background: rgba(153, 109, 0, 0.12); }
+.sxs-diff td.sxs-text + td.sxs-ln { border-left: 1px solid var(--line); }
+.sxs-diff td.sxs-delete { background: rgba(143, 47, 29, 0.12); }
+.sxs-diff td.sxs-delete.sxs-ln { background: rgba(143, 47, 29, 0.18); color: rgba(143, 47, 29, 0.85); }
+.sxs-diff td.sxs-insert { background: rgba(38, 92, 67, 0.12); }
+.sxs-diff td.sxs-insert.sxs-ln { background: rgba(38, 92, 67, 0.18); color: rgba(38, 92, 67, 0.85); }
+.sxs-diff td.sxs-replace { background: rgba(153, 109, 0, 0.12); }
+.sxs-diff td.sxs-blank { background: rgba(111, 90, 71, 0.05); color: transparent; }
+.sxs-diff tr.sxs-equal td.sxs-text { color: var(--text); }
+.sxs-diff tr.sxs-spacer td {
+  padding: 0.55rem;
+  text-align: center;
+  background: rgba(191, 153, 121, 0.08);
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-top: 1px dashed var(--line);
+  border-bottom: 1px dashed var(--line);
+}
 .empty {
   padding: 2rem;
   border: 1px dashed var(--line);
@@ -346,9 +701,560 @@ pre.unified {
   border-radius: 16px;
   background: #fffdf9;
 }
+.workspace-shell {
+  --sidebar-width: 20rem;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 6px minmax(0, 1fr);
+}
+.sidebar {
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  padding: 1rem 0.85rem 0.5rem;
+  background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(255,250,242,0.78));
+  backdrop-filter: blur(12px);
+  min-width: 0;
+  display: flex;
+}
+.sidebar > .stack,
+.sidebar > .stack > * {
+  min-width: 0;
+}
+.sidebar-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.sidebar-search {
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.7);
+  font-size: 0.88rem;
+}
+.sidebar-toolbar-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.sidebar-btn {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.76rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.6);
+  color: var(--muted);
+  cursor: pointer;
+}
+.sidebar-btn:hover {
+  color: var(--text);
+  border-color: rgba(182, 84, 31, 0.4);
+}
+.sidebar-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.tree {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.86rem;
+}
+.tree-root { display: block; }
+.tree-node { margin: 0; }
+.tree-children {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.1rem;
+  display: none;
+}
+.tree-node.open > .tree-children { display: block; }
+.tree-row {
+  display: grid;
+  grid-template-columns: 1.1rem 1fr;
+  align-items: center;
+  column-gap: 0.25rem;
+  padding: 0.18rem 0.35rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tree-row:hover { background: rgba(255, 255, 255, 0.65); }
+.tree-node.node-artifact > .tree-row,
+.tree-leaf { grid-template-columns: 1.35rem 1fr; }
+.tree-toggle {
+  width: 1.1rem;
+  height: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tree-toggle:focus-visible { outline: 2px solid rgba(182, 84, 31, 0.5); outline-offset: 1px; border-radius: 4px; }
+.tree-caret {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform 140ms ease;
+}
+.tree-node.open > .tree-row > .tree-toggle > .tree-caret {
+  transform: rotate(90deg);
+}
+.tree-label {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+  padding: 0.05rem 0.2rem;
+  border-radius: 5px;
+}
+.tree-label:hover { text-decoration: none; }
+.tree-label.active {
+  background: rgba(182, 84, 31, 0.14);
+  font-weight: 600;
+}
+.tree-label-static { cursor: default; }
+.tree-icon {
+  font-size: 0.85rem;
+  opacity: 0.6;
+  text-align: center;
+}
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.tree-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.tree-meta .pill {
+  padding: 0.08rem 0.4rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+.tree-warn {
+  color: var(--warn);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.tree-run-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.3rem 0.3rem 1.85rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.tree-time {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.run-id-chip {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 5px;
+  background: rgba(191, 153, 121, 0.16);
+  letter-spacing: 0.02em;
+}
+.tree-leaf {
+  display: grid;
+  grid-template-columns: 1.35rem 1fr;
+  align-items: center;
+  column-gap: 0.3rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+}
+.tree-leaf:hover { background: rgba(255, 255, 255, 0.65); }
+.tree-leaf.selected {
+  background: rgba(182, 84, 31, 0.14);
+}
+.tree-leaf.selected .tree-name { font-weight: 600; }
+.tree-check-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.tree-check {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.tree-leaf-label {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.05rem 0.1rem;
+  border-radius: 5px;
+}
+.tree-leaf-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.tree-leaf-text .tree-name { font-size: 0.84rem; }
+.tree-sub {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.tree-leaf.filter-hidden,
+.tree-node.filter-hidden { display: none; }
+.tree-empty {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.compare-tray {
+  position: sticky;
+  bottom: 0;
+  margin: 0 -0.5rem -0.5rem;
+  padding: 0.75rem 0.85rem;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,253,248,0.96), rgba(248, 234, 220, 0.96));
+  backdrop-filter: blur(8px);
+  box-shadow: 0 -6px 16px rgba(73, 45, 20, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.compare-tray[hidden] { display: none; }
+.compare-tray-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.compare-tray-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  font-family: var(--mono);
+  color: var(--text);
+  max-height: 5.5rem;
+  overflow-y: auto;
+}
+.compare-tray-preview .item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.5);
+}
+.compare-tray-preview .item .drop {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding: 0;
+}
+.compare-tray-preview .item .drop:hover { color: var(--bad); }
+.compare-tray-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.compare-btn {
+  padding: 0.45rem 0.7rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, #fff9ef, #f2e4d6);
+  color: var(--text);
+  font-size: 0.88rem;
+  cursor: pointer;
+  flex: 1 1 auto;
+}
+.compare-btn:hover { border-color: rgba(182, 84, 31, 0.4); }
+.compare-btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.compare-btn-ghost {
+  background: transparent;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.workspace-resizer {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  width: 6px;
+  cursor: col-resize;
+  background: var(--line);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  transition: background 120ms ease;
+  user-select: none;
+}
+.workspace-resizer:hover,
+.workspace-resizer.dragging {
+  background: rgba(182, 84, 31, 0.55);
+}
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+.sidebar > .stack {
+  gap: 0.9rem;
+}
+.sidebar-inner {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0.6rem;
+}
+.sidebar-brand {
+  padding: 0.2rem 0.15rem 0.25rem;
+  flex: 0 0 auto;
+}
+.sidebar-brand a {
+  color: inherit;
+  text-decoration: none;
+}
+.sidebar-brand h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  letter-spacing: -0.05em;
+}
+.sidebar-brand p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sidebar-label {
+  margin: 0 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.sidebar-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: 0 10px 30px rgba(73, 45, 20, 0.05);
+  padding: 0.95rem;
+}
+.sidebar-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+.sidebar-stat {
+  border: 1px solid rgba(93, 60, 32, 0.1);
+  border-radius: 14px;
+  padding: 0.7rem 0.75rem;
+  background: rgba(255,255,255,0.52);
+}
+.sidebar-stat .label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.sidebar-stat .value {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.run-list {
+  display: grid;
+  gap: 0.65rem;
+}
+.run-link {
+  display: block;
+  border: 1px solid rgba(93, 60, 32, 0.12);
+  border-radius: 16px;
+  padding: 0.8rem 0.85rem;
+  color: inherit;
+  background: rgba(255,255,255,0.56);
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.run-link:hover {
+  text-decoration: none;
+  transform: translateY(-1px);
+  border-color: rgba(182, 84, 31, 0.28);
+  box-shadow: 0 10px 25px rgba(73, 45, 20, 0.08);
+}
+.run-link.active {
+  border-color: rgba(182, 84, 31, 0.42);
+  background: linear-gradient(180deg, rgba(255,253,248,0.96), rgba(248, 234, 220, 0.92));
+  box-shadow: 0 16px 30px rgba(73, 45, 20, 0.08);
+}
+.run-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.6rem;
+}
+.run-id {
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.run-command {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-meta {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.run-meta span {
+  border-radius: 999px;
+  padding: 0.18rem 0.48rem;
+  background: rgba(191, 153, 121, 0.12);
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.workspace {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace-header {
+  padding: 1.45rem 1.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(255,255,255,0.58));
+  backdrop-filter: blur(8px);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+.workspace-header > .workspace-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.workspace-header h1 {
+  margin: 0;
+  font-size: clamp(1.7rem, 2.4vw, 2.45rem);
+  letter-spacing: -0.05em;
+  overflow-wrap: anywhere;
+}
+.workspace-header p {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  max-width: 84ch;
+}
+.workspace-header .actions {
+  flex: 0 0 auto;
+  margin-top: 0.35rem;
+}
+.workspace-subtitle {
+  display: block;
+  margin: 0.6rem 0 0;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  line-height: 1.3;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workspace-eyebrow {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.workspace-body {
+  min-width: 0;
+  padding: 1.2rem 1.5rem 2rem;
+}
+.sidebar form.stack,
+.sidebar form.inline {
+  display: grid;
+  gap: 0.6rem;
+}
+.sidebar label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.sidebar select,
+.sidebar input,
+.sidebar button {
+  width: 100%;
+}
+.sidebar .panel {
+  padding: 0.9rem;
+}
 @media (max-width: 720px) {
   header.shell, main { padding-left: 1rem; padding-right: 1rem; }
   .title { flex-direction: column; align-items: start; }
+  .workspace-header, .workspace-body, .sidebar {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  .workspace-header {
+    align-items: start;
+  }
+}
+@media (max-width: 960px) {
+  .workspace-shell {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: static;
+    height: auto;
+    border-bottom: 1px solid var(--line);
+  }
+  .workspace-resizer {
+    display: none;
+  }
 }
 """
 
@@ -494,6 +1400,303 @@ PROVENANCE_SCRIPT = """
 """
 
 
+COPY_BUTTON_SCRIPT = """
+(() => {
+  document.addEventListener('click', (event) => {
+    const btn = event.target.closest('.copy-btn');
+    if (!btn) return;
+    const targetId = btn.dataset.copyTarget;
+    if (!targetId) return;
+    const source = document.getElementById(targetId);
+    if (!source) return;
+    const text = source.value ?? source.textContent ?? '';
+    const done = () => {
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove('copied');
+      }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => {
+        source.select();
+        document.execCommand('copy');
+        done();
+      });
+    } else {
+      source.select();
+      document.execCommand('copy');
+      done();
+    }
+  });
+})();
+"""
+
+
+HASH_OPEN_SCRIPT = """
+(() => {
+  const openFromHash = () => {
+    const id = (location.hash || '').slice(1);
+    if (!id) return;
+    const el = document.getElementById(id);
+    if (el && el.tagName === 'DETAILS') {
+      el.open = true;
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+  };
+  window.addEventListener('hashchange', openFromHash);
+  window.addEventListener('DOMContentLoaded', openFromHash);
+})();
+"""
+
+
+SIDEBAR_TREE_SCRIPT = """
+(() => {
+  const sidebar = document.querySelector('.sidebar-inner');
+  if (!sidebar) return;
+
+  const STATE_KEY = 'tlhub.treeOpen';
+  const SELECT_KEY = 'tlhub.compareSelection';
+
+  const loadJSON = (key, fallback) => {
+    try {
+      const value = JSON.parse(localStorage.getItem(key) || 'null');
+      return value == null ? fallback : value;
+    } catch (_err) {
+      return fallback;
+    }
+  };
+  const saveJSON = (key, value) => localStorage.setItem(key, JSON.stringify(value));
+
+  // Tree open/close state (per tree-key).
+  const openState = loadJSON(STATE_KEY, {});
+
+  const applyOpenState = () => {
+    sidebar.querySelectorAll('[data-tree-key]').forEach((toggle) => {
+      const key = toggle.dataset.treeKey;
+      const parent = toggle.closest('.tree-node');
+      if (!parent) return;
+      const shouldOpen = openState[key] || parent.classList.contains('open');
+      parent.classList.toggle('open', !!shouldOpen);
+      toggle.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+      // Persist the current state so defaults (active run) are remembered too.
+      if (shouldOpen) openState[key] = true;
+    });
+    saveJSON(STATE_KEY, openState);
+  };
+
+  sidebar.addEventListener('click', (event) => {
+    const toggle = event.target.closest('.tree-toggle');
+    if (!toggle || !sidebar.contains(toggle)) return;
+    event.preventDefault();
+    const key = toggle.dataset.treeKey;
+    const parent = toggle.closest('.tree-node');
+    const open = !parent.classList.contains('open');
+    parent.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) openState[key] = true;
+    else delete openState[key];
+    saveJSON(STATE_KEY, openState);
+  });
+
+  sidebar.querySelectorAll('[data-tree-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.treeAction;
+      sidebar.querySelectorAll('.tree-node').forEach((node) => {
+        const toggle = node.querySelector(':scope > .tree-row > .tree-toggle');
+        if (!toggle) return;
+        const key = toggle.dataset.treeKey;
+        const open = action === 'expand-all';
+        node.classList.toggle('open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) openState[key] = true;
+        else delete openState[key];
+      });
+      saveJSON(STATE_KEY, openState);
+    });
+  });
+
+  // Filtering.
+  const search = sidebar.querySelector('.sidebar-search');
+  if (search) {
+    const filter = () => {
+      const term = search.value.trim().toLowerCase();
+      sidebar.querySelectorAll('.tree-leaf').forEach((leaf) => {
+        const text = leaf.dataset.filterText || '';
+        const match = !term || text.includes(term);
+        leaf.classList.toggle('filter-hidden', !match);
+      });
+      // Hide empty branches (where all leaves are hidden). Keep nodes with hidden descendants visible only if term is empty or they still have a match.
+      sidebar.querySelectorAll('.tree-node').forEach((node) => {
+        if (!term) { node.classList.remove('filter-hidden'); return; }
+        const hasVisibleLeaf = node.querySelector('.tree-leaf:not(.filter-hidden)');
+        node.classList.toggle('filter-hidden', !hasVisibleLeaf);
+        if (hasVisibleLeaf) {
+          node.classList.add('open');
+          const toggle = node.querySelector(':scope > .tree-row > .tree-toggle');
+          if (toggle) toggle.setAttribute('aria-expanded', 'true');
+        }
+      });
+    };
+    search.addEventListener('input', filter);
+  }
+
+  // Selection tray.
+  const tray = sidebar.querySelector('[data-compare-tray]');
+  const countEl = sidebar.querySelector('[data-compare-count]');
+  const previewEl = sidebar.querySelector('[data-compare-preview]');
+  const goBtn = sidebar.querySelector('[data-compare-go]');
+  const clearBtn = sidebar.querySelector('[data-compare-clear]');
+
+  let selection = loadJSON(SELECT_KEY, []);
+  const labelCache = {};
+
+  const collectLabels = () => {
+    sidebar.querySelectorAll('.tree-leaf input.tree-check').forEach((input) => {
+      const id = input.value;
+      const leaf = input.closest('.tree-leaf');
+      const name = leaf?.querySelector('.tree-name')?.textContent?.trim() || id;
+      labelCache[id] = name;
+    });
+  };
+
+  const paintSelection = () => {
+    const ids = new Set(selection);
+    sidebar.querySelectorAll('.tree-leaf input.tree-check').forEach((input) => {
+      const picked = ids.has(input.value);
+      input.checked = picked;
+      input.closest('.tree-leaf')?.classList.toggle('selected', picked);
+    });
+    renderTray();
+  };
+
+  const renderTray = () => {
+    if (!tray) return;
+    const count = selection.length;
+    tray.hidden = count === 0;
+    if (countEl) countEl.textContent = String(count);
+    if (previewEl) {
+      previewEl.innerHTML = selection.map((id, idx) => {
+        const label = labelCache[id] || id;
+        const role = idx === 0 ? 'Left' : idx === 1 ? 'Right' : `#${idx + 1}`;
+        return `<div class="item"><span><strong>${role}:</strong> ${label}</span><button type="button" class="drop" data-remove="${id}" title="Remove">×</button></div>`;
+      }).join('');
+    }
+    if (goBtn) goBtn.disabled = count !== 2;
+  };
+
+  sidebar.addEventListener('change', (event) => {
+    const input = event.target.closest('input.tree-check');
+    if (!input) return;
+    const id = input.value;
+    if (input.checked) {
+      if (!selection.includes(id)) selection.push(id);
+      if (selection.length > 2) {
+        selection = selection.slice(-2);
+      }
+    } else {
+      selection = selection.filter((x) => x !== id);
+    }
+    saveJSON(SELECT_KEY, selection);
+    paintSelection();
+  });
+
+  if (previewEl) {
+    previewEl.addEventListener('click', (event) => {
+      const btn = event.target.closest('button.drop');
+      if (!btn) return;
+      const id = btn.dataset.remove;
+      selection = selection.filter((x) => x !== id);
+      saveJSON(SELECT_KEY, selection);
+      paintSelection();
+    });
+  }
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      selection = [];
+      saveJSON(SELECT_KEY, selection);
+      paintSelection();
+    });
+  }
+
+  if (goBtn) {
+    goBtn.addEventListener('click', () => {
+      if (selection.length !== 2) return;
+      const [left, right] = selection;
+      const base = window.TLHUB_APP_BASE || '';
+      const url = `${base}/diff?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`;
+      window.location.href = url;
+    });
+  }
+
+  applyOpenState();
+  collectLabels();
+  paintSelection();
+})();
+"""
+
+
+WORKSPACE_RESIZE_SCRIPT = """
+(() => {
+  const shell = document.querySelector('.workspace-shell');
+  const handle = document.querySelector('.workspace-resizer');
+  if (!shell || !handle) return;
+  const STORAGE_KEY = 'tlhub.sidebarWidth';
+  const MIN = 220;
+  const MAX = 640;
+  const clamp = (value) => Math.min(MAX, Math.max(MIN, value));
+  const apply = (value) => {
+    shell.style.setProperty('--sidebar-width', clamp(value) + 'px');
+  };
+  const saved = parseInt(localStorage.getItem(STORAGE_KEY) || '', 10);
+  if (!Number.isNaN(saved)) apply(saved);
+  let dragging = false;
+  const onMove = (event) => {
+    if (!dragging) return;
+    const rect = shell.getBoundingClientRect();
+    const width = clamp(event.clientX - rect.left);
+    shell.style.setProperty('--sidebar-width', width + 'px');
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    const current = parseInt(getComputedStyle(shell).getPropertyValue('--sidebar-width'), 10);
+    if (!Number.isNaN(current)) localStorage.setItem(STORAGE_KEY, String(current));
+  };
+  handle.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    dragging = true;
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+  });
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  handle.addEventListener('dblclick', () => {
+    shell.style.setProperty('--sidebar-width', '20rem');
+    localStorage.removeItem(STORAGE_KEY);
+  });
+  handle.addEventListener('keydown', (event) => {
+    const step = event.shiftKey ? 32 : 8;
+    const current = parseInt(getComputedStyle(shell).getPropertyValue('--sidebar-width'), 10) || 320;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      apply(current - step);
+      localStorage.setItem(STORAGE_KEY, String(clamp(current - step)));
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      apply(current + step);
+      localStorage.setItem(STORAGE_KEY, String(clamp(current + step)));
+    }
+  });
+})();
+"""
+
+
 def run_daemon(paths: TLHubPaths, *, host: str = DEFAULT_HOST, port: int = 0) -> None:
     ensure_layout(paths)
     repo = Repository(paths)
@@ -510,12 +1713,17 @@ def run_daemon(paths: TLHubPaths, *, host: str = DEFAULT_HOST, port: int = 0) ->
 
     paths.daemon_pid_path.write_text(str(os.getpid()), encoding="utf-8")
     paths.daemon_port_path.write_text(str(actual_port), encoding="utf-8")
+    paths.daemon_version_path.write_text(__version__, encoding="utf-8")
 
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
         server.server_close()
-        for path in (paths.daemon_pid_path, paths.daemon_port_path):
+        for path in (
+            paths.daemon_pid_path,
+            paths.daemon_port_path,
+            paths.daemon_version_path,
+        ):
             try:
                 path.unlink()
             except FileNotFoundError:
@@ -524,12 +1732,16 @@ def run_daemon(paths: TLHubPaths, *, host: str = DEFAULT_HOST, port: int = 0) ->
 
 def make_handler(paths: TLHubPaths, repo: Repository) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "tlhub/0.1.0"
+        server_version = f"tlhub/{__version__}"
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
-            path = parsed.path
+            try:
+                path = strip_app_path_prefix(parsed.path)
+            except ValueError as error:
+                self.respond_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+                return
 
             if path == "/healthz":
                 self.respond_text("ok")
@@ -565,12 +1777,17 @@ def make_handler(paths: TLHubPaths, repo: Repository) -> type[BaseHTTPRequestHan
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            parts = [part for part in parsed.path.split("/") if part]
+            try:
+                path = strip_app_path_prefix(parsed.path)
+            except ValueError as error:
+                self.respond_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+                return
+            parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[0] == "runs" and parts[2] == "delete":
                 run_id = parts[1]
                 repo.delete_run(run_id)
                 shutil.rmtree(paths.runs_dir / run_id, ignore_errors=True)
-                self.redirect("/")
+                self.redirect(app_url("/"))
                 return
             self.respond_error(HTTPStatus.NOT_FOUND, "Action not found")
 
@@ -604,63 +1821,273 @@ def make_handler(paths: TLHubPaths, repo: Repository) -> type[BaseHTTPRequestHan
     return Handler
 
 
-def render_dashboard(repo: Repository, paths: TLHubPaths) -> str:
-    runs = repo.list_runs()
-    compare_form = render_compare_picker(runs)
-    if not runs:
-        table = "<div class='empty'>No runs captured yet. Prefix a command with <code>tlhub</code> to start collecting traces.</div>"
-    else:
-        rows = "".join(render_run_row(run, load_run_manifest(paths, run["id"])) for run in runs)
-        table = f"""
-        <div class="panel">
-          <h2>Runs</h2>
-          <table class="data">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Status</th>
-                <th>Command</th>
-                <th>Started</th>
-                <th>Duration</th>
-                <th>Artifacts</th>
-                <th>Compiles</th>
-                <th>Ranks</th>
-                <th>Exit</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-          </table>
-        </div>
-        """
+def app_url(
+    path: str = "/",
+    *,
+    query: dict[str, Any] | list[tuple[str, Any]] | None = None,
+) -> str:
+    return build_app_url(path, query=query)
 
+
+def render_workspace_page(
+    repo: Repository,
+    paths: TLHubPaths,
+    *,
+    page_title: str,
+    heading: str,
+    subtitle_html: str,
+    content: str,
+    selected_run_id: str | None = None,
+    left_run: str | None = None,
+    right_run: str | None = None,
+    family: str = "",
+    actions: str = "",
+) -> str:
+    sidebar = render_workspace_sidebar(
+        repo,
+        paths,
+        selected_run_id=selected_run_id,
+        left_run=left_run,
+        right_run=right_run,
+        family=family,
+    )
+    action_block = f"<div class='actions'>{actions}</div>" if actions else ""
     body = f"""
-    <header class="shell">
-      <div class="title">
-        <div>
+    <div class="workspace-shell">
+      <aside class="sidebar">
+        {sidebar}
+      </aside>
+      <div class="workspace-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
+      <section class="workspace">
+        <header class="workspace-header">
+          <div class="workspace-heading">
+            <div class="workspace-eyebrow">Visualizations</div>
+            <h1>{escape(heading)}</h1>
+            {subtitle_html if subtitle_html else ""}
+          </div>
+          {action_block}
+        </header>
+        <main class="workspace-body stack">
+          {content}
+        </main>
+      </section>
+    </div>
+    <script>window.TLHUB_APP_BASE = {json.dumps(app_url('').rstrip('/'))};</script>
+    <script>{WORKSPACE_RESIZE_SCRIPT}</script>
+    <script>{HASH_OPEN_SCRIPT}</script>
+    <script>{COPY_BUTTON_SCRIPT}</script>
+    <script>{SIDEBAR_TREE_SCRIPT}</script>
+    """
+    return page(page_title, body)
+
+
+def render_workspace_sidebar(
+    repo: Repository,
+    paths: TLHubPaths,
+    *,
+    selected_run_id: str | None = None,
+    left_run: str | None = None,
+    right_run: str | None = None,
+    family: str = "",
+) -> str:
+    runs = repo.list_runs()
+    active_run = selected_run_id or (runs[0]["id"] if runs else None)
+    tree_html = (
+        render_run_tree(repo, paths, runs, active_run)
+        if runs
+        else "<div class='empty'>No runs yet. Prefix any command with <code>tlhub</code> to capture traces.</div>"
+    )
+    return f"""
+    <div class="sidebar-inner">
+      <div class="sidebar-brand">
+        <a href="{app_url('/')}">
           <h1>tlhub</h1>
-          <p>Browse raw <code>TORCH_TRACE</code> runs, inspect compile summaries, failures, raw JSONL, export diagnostics, and multi-rank artifacts, then diff any extracted output across runs.</p>
+        </a>
+        <p>Local hub for <code>TORCH_TRACE</code> runs. Pick two artifacts anywhere below and hit compare.</p>
+      </div>
+      <div class="sidebar-toolbar">
+        <input type="search" class="sidebar-search" placeholder="Filter by name, compile id, kind..." aria-label="Filter artifacts">
+        <div class="sidebar-toolbar-actions">
+          <button type="button" class="sidebar-btn" data-tree-action="expand-all" title="Expand all runs">Expand</button>
+          <button type="button" class="sidebar-btn" data-tree-action="collapse-all" title="Collapse all runs">Collapse</button>
         </div>
       </div>
-    </header>
-    <main class="stack">
-      {compare_form}
-      {table}
-    </main>
+      <div class="sidebar-body">
+        {tree_html}
+      </div>
+      <div class="compare-tray" data-compare-tray hidden>
+        <div class="compare-tray-label"><span data-compare-count>0</span> selected</div>
+        <div class="compare-tray-preview" data-compare-preview></div>
+        <div class="compare-tray-actions">
+          <button type="button" class="compare-btn" data-compare-go disabled>Compare</button>
+          <button type="button" class="compare-btn compare-btn-ghost" data-compare-clear>Clear</button>
+        </div>
+      </div>
+    </div>
     """
-    return page("tlhub", body)
 
 
-def render_run_detail(repo: Repository, paths: TLHubPaths, run_id: str) -> str:
+def render_run_tree(
+    repo: Repository,
+    paths: TLHubPaths,
+    runs: list[dict[str, Any]],
+    active_run_id: str | None,
+) -> str:
+    items = []
+    for run in runs:
+        items.append(render_run_tree_node(repo, paths, run, active_run_id))
+    return f"<ul class='tree tree-root'>{''.join(items)}</ul>"
+
+
+def render_run_tree_node(
+    repo: Repository,
+    paths: TLHubPaths,
+    run: dict[str, Any],
+    active_run_id: str | None,
+) -> str:
+    run_id = run["id"]
+    manifest = load_run_manifest(paths, run_id) or {}
+    artifacts = repo.list_artifacts(run_id)
+    artifact_by_id = {artifact["id"]: artifact for artifact in artifacts}
+    report_ids = set(manifest.get("report_artifact_ids", []) or [])
+    compiles = manifest.get("compiles", [])
+
+    compile_nodes = []
+    seen_artifact_ids: set[str] = set()
+    for compile_entry in compiles:
+        compile_nodes.append(render_compile_tree_node(run_id, compile_entry, seen_artifact_ids))
+
+    leftover = [
+        artifact
+        for artifact in artifacts
+        if artifact["id"] not in seen_artifact_ids and artifact["id"] not in report_ids
+    ]
+    if leftover:
+        compile_nodes.append(render_artifact_group("Other", leftover, group_key=f"run:{run_id}:other"))
+
+    reports = [artifact_by_id[aid] for aid in report_ids if aid in artifact_by_id]
+    if reports:
+        compile_nodes.append(render_artifact_group("Reports", reports, group_key=f"run:{run_id}:reports"))
+
+    children_html = "".join(compile_nodes) or "<li class='tree-empty muted'>No artifacts captured.</li>"
+    is_active = run_id == active_run_id
+    default_open = is_active
+    expanded_attr = "true" if default_open else "false"
+    open_class = " open" if default_open else ""
+
+    warning_count = len(manifest.get("warnings", []) or [])
+    warning_badge = f"<span class='tree-warn' title='{warning_count} warning(s)'>{warning_count}&#9888;</span>" if warning_count else ""
+    summary_label = summarize_command(run)
+    when_label = format_sidebar_time(run.get("started_at"))
+    tooltip = f"{run_id}\n{run.get('command_display', '')}".strip()
+    meta_parts = []
+    if when_label:
+        meta_parts.append(f"<span class='tree-time'>{escape(when_label)}</span>")
+    meta_parts.append(f"<span class='muted'>{run['artifact_count']}f &middot; {len(compiles)}c</span>")
+    if warning_badge:
+        meta_parts.append(warning_badge)
+    meta_parts.append(f"<span class='mono run-id-chip muted' title='{escape(run_id)}'>{escape(run_id[-8:])}</span>")
+    sub_meta = "".join(meta_parts)
+    return f"""
+    <li class="tree-node node-run{open_class}" data-tree-node data-run-id="{escape(run_id)}">
+      <div class="tree-row">
+        <button type="button" class="tree-toggle" data-tree-key="run:{escape(run_id)}" aria-expanded="{expanded_attr}">
+          <span class="tree-caret" aria-hidden="true"></span>
+        </button>
+        <a class="tree-label tree-run-label{' active' if is_active else ''}" href="{app_url('/runs/' + quote(run_id))}" title="{escape(tooltip)}">
+          <span class="tree-icon" aria-hidden="true">&#128193;</span>
+          <span class="tree-name">{escape(summary_label)}</span>
+          <span class="tree-meta">{render_status(run['status'])}</span>
+        </a>
+      </div>
+      <div class="tree-run-sub">{sub_meta}</div>
+      <ul class="tree-children">{children_html}</ul>
+    </li>
+    """
+
+
+def render_compile_tree_node(
+    run_id: str,
+    compile_entry: dict[str, Any],
+    seen_artifact_ids: set[str],
+) -> str:
+    compile_dir = compile_entry.get("compile_dir") or ""
+    compile_id = compile_entry.get("compile_id") or compile_dir
+    artifacts = compile_entry.get("artifacts") or []
+    status = compile_entry.get("status", "missing")
+    for artifact in artifacts:
+        seen_artifact_ids.add(artifact["id"])
+    leaves = "".join(render_artifact_leaf(artifact) for artifact in artifacts)
+    leaves_html = leaves or "<li class='tree-empty muted'>No artifacts.</li>"
+    compile_link = app_url("/runs/" + quote(run_id) + "/compiles/" + quote(compile_dir))
+    return f"""
+    <li class="tree-node node-compile" data-tree-node>
+      <div class="tree-row">
+        <button type="button" class="tree-toggle" data-tree-key="compile:{escape(run_id)}:{escape(compile_dir)}" aria-expanded="false">
+          <span class="tree-caret" aria-hidden="true"></span>
+        </button>
+        <a class="tree-label" href="{compile_link}">
+          <span class="tree-icon" aria-hidden="true">&#9881;</span>
+          <span class="tree-name mono">{escape(compile_id)}</span>
+          <span class="tree-meta">
+            <span class="pill {status_class(status)}">{escape(status)}</span>
+            <span class="muted">{len(artifacts)} file{'s' if len(artifacts) != 1 else ''}</span>
+          </span>
+        </a>
+      </div>
+      <ul class="tree-children">{leaves_html}</ul>
+    </li>
+    """
+
+
+def render_artifact_group(label: str, artifacts: list[dict[str, Any]], *, group_key: str) -> str:
+    leaves = "".join(render_artifact_leaf(artifact) for artifact in artifacts)
+    return f"""
+    <li class="tree-node node-group" data-tree-node>
+      <div class="tree-row">
+        <button type="button" class="tree-toggle" data-tree-key="{escape(group_key)}" aria-expanded="false">
+          <span class="tree-caret" aria-hidden="true"></span>
+        </button>
+        <span class="tree-label tree-label-static">
+          <span class="tree-icon" aria-hidden="true">&#128196;</span>
+          <span class="tree-name">{escape(label)}</span>
+          <span class="tree-meta muted">{len(artifacts)}</span>
+        </span>
+      </div>
+      <ul class="tree-children">{leaves}</ul>
+    </li>
+    """
+
+
+def render_artifact_leaf(artifact: dict[str, Any]) -> str:
+    filename = artifact["relative_path"].split("/")[-1]
+    artifact_id = artifact["id"]
+    kind = artifact.get("kind") or ""
+    event = artifact.get("event_type") or ""
+    subtitle_bits = [bit for bit in [kind, event] if bit and bit != kind]
+    subtitle = " · ".join(subtitle_bits) if subtitle_bits else kind or ""
+    return f"""
+    <li class="tree-leaf" data-filter-text="{escape((filename + ' ' + kind + ' ' + event).lower())}">
+      <label class="tree-check-wrap" title="Select to compare">
+        <input type="checkbox" class="tree-check" value="{escape(artifact_id)}" aria-label="Select {escape(filename)} for comparison">
+      </label>
+      <a class="tree-label tree-leaf-label" href="{app_url('/artifacts/' + quote(artifact_id))}">
+        <span class="tree-icon" aria-hidden="true">&#128196;</span>
+        <span class="tree-leaf-text">
+          <span class="tree-name mono">{escape(filename)}</span>
+          {f"<span class='tree-sub muted'>{escape(subtitle)}</span>" if subtitle else ""}
+        </span>
+      </a>
+    </li>
+    """
+
+
+def render_run_workspace_content(repo: Repository, paths: TLHubPaths, run_id: str) -> str:
     run = repo.get_run(run_id)
-    if run is None:
-        return page("Run not found", f"<div class='empty'>Run <code>{escape(run_id)}</code> was not found.</div>")
     manifest = load_run_manifest(paths, run_id)
-    if manifest is None:
-        return page("Run not found", f"<div class='empty'>Run manifest for <code>{escape(run_id)}</code> is missing.</div>")
+    if run is None or manifest is None:
+        return f"<div class='empty'>Run <code>{escape(run_id)}</code> is unavailable.</div>"
 
-    runs = repo.list_runs()
-    compare_form = render_compare_picker(runs, left_run=run_id)
     artifacts = repo.list_artifacts(run_id)
     artifact_by_id = {artifact["id"]: artifact for artifact in artifacts}
     report_artifacts = [
@@ -671,23 +2098,26 @@ def render_run_detail(repo: Repository, paths: TLHubPaths, run_id: str) -> str:
     primary_artifacts = [artifact for artifact in artifacts if artifact["id"] not in manifest.get("report_artifact_ids", [])]
     provenance_groups = build_provenance_groups(primary_artifacts)
     compile_table = render_compile_table(run_id, manifest.get("compiles", []))
-    failures = render_failures_panel(manifest.get("failures_and_restarts", []))
+    failures_panel = render_failures_panel(manifest.get("failures_and_restarts", []))
     export_panel = render_export_panel(run_id, manifest.get("export"))
     multirank_panel = render_multi_rank_panel(manifest.get("multi_rank"))
     warnings_panel = render_warnings_panel(manifest.get("warnings", []))
     vllm_panel = render_vllm_panel(manifest.get("vllm"))
     provenance_panel = render_provenance_panel(run_id, provenance_groups, artifact_by_id)
     stack_trie = render_stack_trie(run_id, manifest.get("compiles", []))
+    ir_dumps = render_ir_dumps_panel(run_id, manifest.get("compiles", []))
     unknown_stacks = render_unknown_stacks(manifest.get("unknown_stacks", []))
     report_panel = render_report_artifacts(report_artifacts)
+    overview_panel = render_run_overview_panel(run, manifest)
+    jumps = render_section_jumps(manifest, report_artifacts, provenance_groups, primary_artifacts)
 
     artifact_table = (
-        "<div class='empty'>This run produced no indexed artifacts.</div>"
+        ""
         if not primary_artifacts
         else f"""
         <div class="panel">
-          <h2>Artifacts</h2>
-          <p class="section-copy">These are the extracted per-event payloads and code or graph dumps. Synthetic reports like <code>raw.jsonl</code> and multi-rank analyses are listed separately above.</p>
+          <h2>All artifacts</h2>
+          <p class="section-copy">Flat listing of every extracted per-event payload. Synthetic reports like <code>raw.jsonl</code> and multi-rank analyses are listed separately in Reports.</p>
           <table class="data">
             <thead>
               <tr>
@@ -707,107 +2137,293 @@ def render_run_detail(repo: Repository, paths: TLHubPaths, run_id: str) -> str:
         """
     )
 
-    body = f"""
-    <header class="shell">
-      <div class="title">
-        <div>
-          <h1>Run {escape(run['id'])}</h1>
-          <p class="mono">{escape(run['command_display'])}</p>
-        </div>
-        <div class="actions">
-          <a href="/">Back</a>
-        </div>
-      </div>
-    </header>
-    <main class="stack">
-      <div class="grid-2">
-        <div class="panel">
-          <h2>Run metadata</h2>
-          <div class="kpis">
-            <div class="kpi"><span class="label">Status</span><span class="value">{render_status(run['status'])}</span></div>
-            <div class="kpi"><span class="label">Started</span><span class="value">{escape(run['started_at'])}</span></div>
-            <div class="kpi"><span class="label">Duration</span><span class="value">{escape(format_duration(run['duration_ms']))}</span></div>
-            <div class="kpi"><span class="label">Artifacts</span><span class="value">{run['artifact_count']}</span></div>
-            <div class="kpi"><span class="label">Compiles</span><span class="value">{manifest.get('compile_count', 0)}</span></div>
-            <div class="kpi"><span class="label">Ranks</span><span class="value">{format_rank_count(manifest.get('multi_rank'))}</span></div>
-            <div class="kpi"><span class="label">Logs</span><span class="value">{run['log_count']}</span></div>
-            <div class="kpi"><span class="label">Exit</span><span class="value">{'' if run['exit_code'] is None else run['exit_code']}</span></div>
-          </div>
-          <div class="summary-list" style="margin-top:1rem;">
-            <div><span class="muted">Trace dir</span><span class="mono">{escape(run['trace_dir'])}</span></div>
-            <div><span class="muted">CWD</span><span class="mono">{escape(run['cwd'])}</span></div>
-            <div><span class="muted">Host</span><span class="mono">{escape(run['hostname'])}</span></div>
-            <div><span class="muted">Warnings</span><span class="mono">{len(manifest.get('warnings', []))}</span></div>
-          </div>
-        </div>
-        {compare_form}
-      </div>
-      {report_panel}
-      {compile_table}
-      {warnings_panel}
-      {failures}
-      {export_panel}
-      {multirank_panel}
-      {vllm_panel}
-      {provenance_panel}
-      {stack_trie}
-      {unknown_stacks}
-      {artifact_table}
-    </main>
+    collapsed_sections = "".join(
+        _collapsed(anchor, title, body)
+        for anchor, title, body in [
+            ("compile-directory", "Compile directory table", compile_table),
+            ("artifacts", "All artifacts", artifact_table),
+            ("reports", "Reports", report_panel),
+            ("warnings", "Warnings", warnings_panel),
+            ("failures", "Failures and restarts", failures_panel),
+            ("export", "Export diagnostics", export_panel),
+            ("multi-rank", "Multi-rank diagnostics", multirank_panel),
+            ("vllm", "vLLM summary", vllm_panel),
+            ("provenance", "Provenance tracking", provenance_panel),
+            ("unknown-stacks", "Unknown stacks", unknown_stacks),
+        ]
+        if body
+    )
+
+    return f"""
+    {overview_panel}
+    {jumps}
+    {stack_trie}
+    {ir_dumps}
+    {collapsed_sections}
     """
-    return page(f"Run {run_id}", body)
+
+
+def _collapsed(anchor: str, title: str, body: str) -> str:
+    return f"""
+    <details class="collapsed-panel" id="{escape(anchor)}">
+      <summary>{escape(title)}</summary>
+      <div class="collapsed-body">{body}</div>
+    </details>
+    """
+
+
+def render_section_jumps(
+    manifest: dict[str, Any],
+    report_artifacts: list[dict[str, Any]],
+    provenance_groups: list[dict[str, Any]],
+    primary_artifacts: list[dict[str, Any]],
+) -> str:
+    chips: list[tuple[str, str, int]] = []
+    failures = manifest.get("failures_and_restarts", [])
+    if failures:
+        chips.append(("#failures", "Failures and restarts", len(failures)))
+    if manifest.get("export"):
+        chips.append(("#export", "Export diagnostics", len((manifest.get("export") or {}).get("failures", []) or [])))
+    if manifest.get("multi_rank"):
+        chips.append(("#multi-rank", "Multi-rank diagnostics", (manifest.get("multi_rank") or {}).get("num_ranks", 0)))
+    if manifest.get("vllm"):
+        chips.append(("#vllm", "vLLM summary", len((manifest.get("vllm") or {}).get("subgraphs", []) or [])))
+    if provenance_groups:
+        chips.append(("#provenance", "Provenance tracking", len(provenance_groups)))
+    if manifest.get("warnings"):
+        chips.append(("#warnings", "Warnings", len(manifest.get("warnings", []))))
+    if report_artifacts:
+        chips.append(("#reports", "Reports", len(report_artifacts)))
+    if primary_artifacts:
+        chips.append(("#artifacts", "All artifacts", len(primary_artifacts)))
+    if not chips:
+        return ""
+    chip_html = "".join(
+        f"<a href='{anchor}'>{escape(label)} <span class='count'>{count}</span></a>"
+        for anchor, label, count in chips
+    )
+    return f"<div class='section-jumps'>{chip_html}</div>"
+
+
+def render_run_overview_panel(run: dict[str, Any], manifest: dict[str, Any]) -> str:
+    command = run.get("command_display") or ""
+    command_block = (
+        f"""
+        <details class="command-block">
+          <summary>Command</summary>
+          <pre class="command-pre">{escape(command)}</pre>
+        </details>
+        """
+        if command
+        else ""
+    )
+    return f"""
+    <div class="panel">
+      <h2>Run overview</h2>
+      <div class="kpis">
+        <div class="kpi"><span class="label">Status</span><span class="value">{render_status(run['status'])}</span></div>
+        <div class="kpi"><span class="label">Started</span><span class="value">{escape(format_timestamp(run['started_at']))}</span></div>
+        <div class="kpi"><span class="label">Duration</span><span class="value">{escape(format_duration(run['duration_ms']))}</span></div>
+        <div class="kpi"><span class="label">Artifacts</span><span class="value">{run['artifact_count']}</span></div>
+        <div class="kpi"><span class="label">Compiles</span><span class="value">{manifest.get('compile_count', 0)}</span></div>
+        <div class="kpi"><span class="label">Ranks</span><span class="value">{format_rank_count(manifest.get('multi_rank'))}</span></div>
+        <div class="kpi"><span class="label">Logs</span><span class="value">{run['log_count']}</span></div>
+        <div class="kpi"><span class="label">Exit</span><span class="value">{'' if run['exit_code'] is None else run['exit_code']}</span></div>
+      </div>
+      <div class="summary-list" style="margin-top:1rem;">
+        <div><span class="muted">Trace dir</span><span class="mono">{escape(run['trace_dir'])}</span></div>
+        <div><span class="muted">CWD</span><span class="mono">{escape(run['cwd'])}</span></div>
+        <div><span class="muted">Host</span><span class="mono">{escape(run['hostname'])}</span></div>
+        <div><span class="muted">Warnings</span><span class="mono">{len(manifest.get('warnings', []))}</span></div>
+      </div>
+      {command_block}
+    </div>
+    """
+
+
+def render_run_surface_panel(
+    *,
+    manifest: dict[str, Any],
+    primary_artifacts: list[dict[str, Any]],
+    report_artifacts: list[dict[str, Any]],
+    provenance_groups: list[dict[str, Any]],
+) -> str:
+    kind_counts: dict[str, int] = {}
+    for artifact in primary_artifacts:
+        kind_counts[artifact["kind"]] = kind_counts.get(artifact["kind"], 0) + 1
+    kind_preview = ", ".join(
+        f"{count} {kind}"
+        for kind, count in sorted(kind_counts.items(), key=lambda item: (-item[1], item[0]))[:4]
+    ) or "n/a"
+    graph_breaks = sum(1 for item in manifest.get("compiles", []) if item.get("status") == "break")
+    failures = manifest.get("failures_and_restarts", [])
+    export = manifest.get("export") or {}
+    return f"""
+    <div class="panel">
+      <h2>Captured views</h2>
+      <p class="section-copy">This pane keeps the run-level surfaces up front so you can move from compile orientation to detailed artifacts without switching screens.</p>
+      <div class="summary-list">
+        <div><span class="muted">Primary artifacts</span><span class="mono">{len(primary_artifacts)}</span></div>
+        <div><span class="muted">Synthetic reports</span><span class="mono">{len(report_artifacts)}</span></div>
+        <div><span class="muted">Provenance views</span><span class="mono">{len(provenance_groups)}</span></div>
+        <div><span class="muted">Graph breaks</span><span class="mono">{graph_breaks}</span></div>
+        <div><span class="muted">Failures or restarts</span><span class="mono">{len(failures)}</span></div>
+        <div><span class="muted">Export diagnostics</span><span class="mono">{'captured' if export else 'none'}</span></div>
+        <div><span class="muted">Multi-rank analysis</span><span class="mono">{'yes' if manifest.get('multi_rank') else 'no'}</span></div>
+        <div><span class="muted">Artifact mix</span><span class="mono">{escape(kind_preview)}</span></div>
+      </div>
+    </div>
+    """
+
+
+def render_dashboard(repo: Repository, paths: TLHubPaths) -> str:
+    runs = repo.list_runs()
+    if not runs:
+        content = "<div class='empty'>No runs captured yet. Prefix a command with <code>tlhub</code> to start collecting traces.</div>"
+        return render_workspace_page(
+            repo,
+            paths,
+            page_title="tlhub",
+            heading="No runs yet",
+            subtitle_html="<p>Wrap any command with <code>tlhub</code> and the daemon will index the trace automatically.</p>",
+            content=content,
+        )
+
+    selected = runs[0]
+    actions = (
+        f"<a href='{app_url('/runs/' + quote(selected['id']))}'>Permalink</a>"
+        f"<a href='{app_url('/compare', query={'left_run': selected['id']})}'>Compare run</a>"
+    )
+    return render_workspace_page(
+        repo,
+        paths,
+        page_title="tlhub",
+        heading=f"Run {selected['id']}",
+        subtitle_html=render_command_subtitle(selected["command_display"]),
+        content=render_run_workspace_content(repo, paths, selected["id"]),
+        selected_run_id=selected["id"],
+        left_run=selected["id"],
+        actions=actions,
+    )
+
+
+def render_run_detail(repo: Repository, paths: TLHubPaths, run_id: str) -> str:
+    run = repo.get_run(run_id)
+    if run is None:
+        return page("Run not found", f"<div class='empty'>Run <code>{escape(run_id)}</code> was not found.</div>")
+    manifest = load_run_manifest(paths, run_id)
+    if manifest is None:
+        return page("Run not found", f"<div class='empty'>Run manifest for <code>{escape(run_id)}</code> is missing.</div>")
+    delete_action = app_url("/runs/" + quote(run["id"]) + "/delete")
+    actions = (
+        f"<a href='{app_url('/compare', query={'left_run': run['id']})}'>Compare run</a>"
+        f"<form class='inline' action='{delete_action}' method='post'>"
+        "<button class='danger' type='submit'>Delete run</button>"
+        "</form>"
+    )
+    return render_workspace_page(
+        repo,
+        paths,
+        page_title=f"Run {run_id}",
+        heading=f"Run {run['id']}",
+        subtitle_html=render_command_subtitle(run["command_display"]),
+        content=render_run_workspace_content(repo, paths, run_id),
+        selected_run_id=run_id,
+        left_run=run_id,
+        actions=actions,
+    )
 
 
 def render_artifact(repo: Repository, paths: TLHubPaths, artifact_id: str) -> str:
     artifact = repo.get_artifact(artifact_id)
     if artifact is None:
-        return page("Artifact not found", f"<div class='empty'>Artifact <code>{escape(artifact_id)}</code> was not found.</div>")
+        return page(
+            "Artifact not found",
+            f"<div class='empty'>Artifact <code>{escape(artifact_id)}</code> was not found.</div>",
+        )
 
     run = repo.get_run(artifact["run_id"])
     assert run is not None
     content = read_artifact_text(paths, artifact)
+    line_count = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
+    byte_count = len(content.encode("utf-8"))
+    language = detect_language(artifact)
     summary = render_summary_card(artifact["summary"])
-    source = render_source_block(content)
-    compare_link = "/compare?" + urlencode({"left_run": artifact["run_id"], "family": artifact["family"]})
+    source = render_source_block(content, language)
+    compare_link = app_url(
+        "/compare",
+        query={"left_run": artifact["run_id"], "family": artifact["family"]},
+    )
+    compile_id = artifact.get("compile_id")
+    compile_link = (
+        f"<a href='{app_url('/runs/' + quote(run['id']) + '/compiles/' + quote(compile_id))}'>{escape(compile_id)}</a>"
+        if compile_id
+        else "<span class='muted'>n/a</span>"
+    )
+    filename = artifact["relative_path"].split("/")[-1]
 
-    body = f"""
-    <header class="shell">
-      <div class="title">
-        <div>
-          <h1>{escape(artifact['title'])}</h1>
-          <p><a href="/runs/{quote(run['id'])}">Run {escape(run['id'])}</a> | <span class="mono">{escape(artifact['relative_path'])}</span></p>
-        </div>
-        <div class="actions">
-          <a href="{compare_link}">Compare this family</a>
-          <a href="/runs/{quote(run['id'])}">Back to run</a>
-        </div>
-      </div>
-    </header>
-    <main class="stack">
-      <div class="grid-2">
-        <div class="panel">
-          <h2>Artifact metadata</h2>
-          <div class="summary-list">
-            <div><span class="muted">Match key</span><span class="mono">{escape(artifact['match_key'])}</span></div>
-            <div><span class="muted">Kind</span><span>{escape(artifact['kind'])}</span></div>
-            <div><span class="muted">Event</span><span>{escape(artifact['event_type'])}</span></div>
-            <div><span class="muted">Compile</span><span class="mono">{escape(artifact['compile_id'] or 'n/a')}</span></div>
-            <div><span class="muted">Origin</span><span class="mono">{escape(f"{artifact['log_file']}:{artifact['line_no']}")}</span></div>
-            <div><span class="muted">SHA</span><span class="mono">{escape(artifact['sha256'][:16])}</span></div>
+    actions = (
+        f"<a href='{compare_link}'>Compare family</a>"
+        f"<a href='{app_url('/runs/' + quote(run['id']))}'>Back to run</a>"
+    )
+
+    subtitle = (
+        "<div class='artifact-breadcrumb'>"
+        f"<a href='{app_url('/runs/' + quote(run['id']))}'>Run {escape(run['id'])}</a>"
+        f"<span class='sep'>/</span>"
+        f"<span class='mono'>{escape(artifact['relative_path'])}</span>"
+        "</div>"
+    )
+
+    language_label = {"python": "Python", "fx": "FX graph", "json": "JSON", "plain": "Text"}.get(language, "Text")
+    content_panel = f"""
+      <div class="panel artifact-content-panel">
+        <div class="panel-head">
+          <div>
+            <h2>{escape(filename)}</h2>
+            <div class="mini-note muted">{line_count} line{'s' if line_count != 1 else ''} · {format_bytes(byte_count)} · <span class='lang-chip'>{escape(language_label)}</span></div>
+          </div>
+          <div class="panel-head-actions">
+            <button class="copy-btn" type="button" data-copy-target="artifact-text">Copy</button>
           </div>
         </div>
-        <div class="panel">
-          <h2>Summary</h2>
-          {summary}
+        <textarea id="artifact-text" class="visually-hidden" readonly>{escape(content)}</textarea>
+        <div class="source-scroll">{source}</div>
+      </div>
+    """
+
+    body = f"""
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Metadata</h2>
+        <div class="summary-list">
+          <div><span class="muted">Match key</span><span class="mono">{escape(artifact['match_key'])}</span></div>
+          <div><span class="muted">Kind</span><span class="mono">{escape(artifact['kind'])}</span></div>
+          <div><span class="muted">Event</span><span class="mono">{escape(artifact['event_type'])}</span></div>
+          <div><span class="muted">Compile</span><span>{compile_link}</span></div>
+          <div><span class="muted">Origin</span><span class="mono">{escape(f"{artifact['log_file']}:{artifact['line_no']}")}</span></div>
+          <div><span class="muted">SHA</span><span class="mono">{escape(artifact['sha256'][:16])}</span></div>
         </div>
       </div>
       <div class="panel">
-        <h2>Content</h2>
-        {source}
+        <h2>Summary</h2>
+        {summary}
       </div>
-    </main>
+    </div>
+    {content_panel}
     """
-    return page(artifact["title"], body)
+    return render_workspace_page(
+        repo,
+        paths,
+        page_title=artifact["title"],
+        heading=artifact["title"],
+        subtitle_html=subtitle,
+        content=body,
+        selected_run_id=run["id"],
+        left_run=run["id"],
+        family=artifact["family"],
+        actions=actions,
+    )
 
 
 def render_compare(repo: Repository, params: dict[str, list[str]]) -> str:
@@ -815,8 +2431,6 @@ def render_compare(repo: Repository, params: dict[str, list[str]]) -> str:
     left_run_id = first_param(params, "left_run")
     right_run_id = first_param(params, "right_run")
     family_filter = first_param(params, "family") or ""
-
-    compare_form = render_compare_picker(runs, left_run=left_run_id, right_run=right_run_id, family=family_filter)
 
     content = ""
     if left_run_id and right_run_id:
@@ -847,25 +2461,18 @@ def render_compare(repo: Repository, params: dict[str, list[str]]) -> str:
             </div>
             {matches}
             """
-
-    body = f"""
-    <header class="shell">
-      <div class="title">
-        <div>
-          <h1>Compare Runs</h1>
-          <p>Match artifacts by family and occurrence order, or pick any two artifacts manually when the pairing is not obvious.</p>
-        </div>
-        <div class="actions">
-          <a href="/">Back</a>
-        </div>
-      </div>
-    </header>
-    <main class="stack">
-      {compare_form}
-      {content if content else "<div class='empty'>Choose two runs to line up their artifacts.</div>"}
-    </main>
-    """
-    return page("Compare runs", body)
+    return render_workspace_page(
+        repo,
+        repo.paths if hasattr(repo, "paths") else ensure_layout(None),
+        page_title="Compare runs",
+        heading="Compare runs",
+        subtitle_html="<p>Match artifacts by family and occurrence order, or pick any two artifacts manually when the pairing is not obvious.</p>",
+        content=content if content else "<div class='empty'>Choose two runs in the left rail to line up their artifacts.</div>",
+        selected_run_id=left_run_id,
+        left_run=left_run_id,
+        right_run=right_run_id,
+        family=family_filter,
+    )
 
 
 def render_diff(repo: Repository, paths: TLHubPaths, params: dict[str, list[str]]) -> str:
@@ -882,13 +2489,11 @@ def render_diff(repo: Repository, paths: TLHubPaths, params: dict[str, list[str]
     left_text = read_artifact_text(paths, left)
     right_text = read_artifact_text(paths, right)
 
-    diff_table = difflib.HtmlDiff(wrapcolumn=120).make_table(
-        left_text.splitlines(),
-        right_text.splitlines(),
-        fromdesc=html.escape(left["title"]),
-        todesc=html.escape(right["title"]),
-        context=True,
-        numlines=4,
+    diff_table = render_side_by_side_diff(
+        left_text,
+        right_text,
+        left_title=left["title"],
+        right_title=right["title"],
     )
     unified = "\n".join(
         difflib.unified_diff(
@@ -900,7 +2505,6 @@ def render_diff(repo: Repository, paths: TLHubPaths, params: dict[str, list[str]
             lineterm="",
         )
     )
-    summary = render_diff_summary(left["summary"], right["summary"])
     semantic_diff = render_semantic_diff(left, right, left_text, right_text)
     compare_query = {
         "left_run": left["run_id"],
@@ -908,42 +2512,39 @@ def render_diff(repo: Repository, paths: TLHubPaths, params: dict[str, list[str]
     }
     if left["family"] == right["family"]:
         compare_query["family"] = left["family"]
-
-    body = f"""
-    <header class="shell">
-      <div class="title">
-        <div>
-          <h1>Artifact Diff</h1>
-          <p><span class="mono">{escape(left['match_key'])}</span> vs <span class="mono">{escape(right['match_key'])}</span></p>
-        </div>
-        <div class="actions">
-          <a href="/compare?{urlencode(compare_query)}">Back to compare</a>
-        </div>
-      </div>
-    </header>
-    <main class="stack">
-      <div class="grid-2">
-        {render_diff_side("Left", left)}
-        {render_diff_side("Right", right)}
-      </div>
-      <div class="panel">
-        <h2>Delta summary</h2>
-        {summary}
-      </div>
-      {semantic_diff}
-      <div class="panel">
-        <h2>Side-by-side diff</h2>
-        <div class="diff-wrap">{diff_table}</div>
-      </div>
-      <div class="panel">
-        <details class="unified" open>
-          <summary>Unified diff</summary>
-          <pre class="unified">{escape(unified or 'No textual diff.')}</pre>
-        </details>
-      </div>
-    </main>
+    content = f"""
+    <div class="grid-2">
+      {render_diff_side("Left", left)}
+      {render_diff_side("Right", right)}
+    </div>
+    {semantic_diff}
+    <div class="panel">
+      <h2>Side-by-side diff</h2>
+      {diff_table}
+    </div>
+    <div class="panel">
+      <details class="unified">
+        <summary>Unified diff</summary>
+        <pre class="unified">{escape(unified or 'No textual diff.')}</pre>
+      </details>
+    </div>
     """
-    return page("Diff", body)
+    return render_workspace_page(
+        repo,
+        paths,
+        page_title="Diff",
+        heading="Artifact diff",
+        subtitle_html=(
+            f"<p><span class='mono'>{escape(left['match_key'])}</span> "
+            f"vs <span class='mono'>{escape(right['match_key'])}</span></p>"
+        ),
+        content=content,
+        selected_run_id=left["run_id"],
+        left_run=left["run_id"],
+        right_run=right["run_id"],
+        family=left["family"] if left["family"] == right["family"] else "",
+        actions=f"<a href='{app_url('/compare', query=compare_query)}'>Back to compare</a>",
+    )
 
 
 def render_compile_detail(
@@ -1001,15 +2602,19 @@ def render_compile_detail(
         compile_entry,
         build_provenance_groups(repo.list_artifacts(run_id)),
     )
+    backward_metrics_panel = render_backward_metrics_panel(
+        compile_entry.get("bwd_compilation_metrics") or {},
+        compile_entry.get("aot_autograd_backward_compilation_metrics") or {},
+    )
     body = f"""
     <header class="shell">
       <div class="title">
         <div>
           <h1>{escape(compile_entry['compile_id'])}</h1>
-          <p><a href="/runs/{quote(run_id)}">Run {escape(run_id)}</a> | <span class="mono">{escape(compile_entry['compile_dir'])}</span></p>
+          <p><a href="{app_url('/runs/' + quote(run_id))}">Run {escape(run_id)}</a> | <span class="mono">{escape(compile_entry['compile_dir'])}</span></p>
         </div>
         <div class="actions">
-          <a href="/runs/{quote(run_id)}">Back to run</a>
+          <a href="{app_url('/runs/' + quote(run_id))}">Back to run</a>
         </div>
       </div>
     </header>
@@ -1085,6 +2690,7 @@ def render_compile_detail(
           {render_symbol_table(compile_entry.get("unbacked_symbols", []), created=False)}
         </div>
       </div>
+      {backward_metrics_panel}
       <div class="grid-2">
         <div class="panel">
           <h2>Links</h2>
@@ -1098,6 +2704,52 @@ def render_compile_detail(
     </main>
     """
     return page(compile_entry["compile_id"], body)
+
+
+def render_backward_metrics_panel(
+    bwd: dict[str, Any],
+    aot_backward: dict[str, Any],
+) -> str:
+    if not bwd and not aot_backward:
+        return ""
+    bwd_time_rows = render_metrics_list(
+        {
+            "Inductor compile time (s)": bwd.get("inductor_compile_time_s"),
+            "Codegen time (s)": bwd.get("code_gen_time_s"),
+        }
+    )
+    bwd_failures = (
+        f"<div class='summary-list'>"
+        f"<div><span class='muted'>Failure type</span><span class='mono'>{escape(str(bwd.get('fail_type')))}</span></div>"
+        f"<div><span class='muted'>Reason</span><span class='mono'>{escape(str(bwd.get('fail_reason') or ''))}</span></div>"
+        f"</div>"
+        if bwd.get("fail_type")
+        else "<div class='muted'>No failures.</div>"
+    )
+    aot_failures = (
+        f"<div class='summary-list'>"
+        f"<div><span class='muted'>Failure type</span><span class='mono'>{escape(str(aot_backward.get('fail_type')))}</span></div>"
+        f"<div><span class='muted'>Reason</span><span class='mono'>{escape(str(aot_backward.get('fail_reason') or ''))}</span></div>"
+        f"</div>"
+        if aot_backward.get("fail_type")
+        else "<div class='muted'>No failures.</div>"
+    )
+    return f"""
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Backward compilation metrics</h2>
+        <p class="section-copy">Mirrors the <code>bwd_compilation_metrics.html</code> surface in <code>tlparse</code>: backward-phase compile times and failures.</p>
+        {bwd_time_rows if bwd else "<div class='muted'>No backward compile metrics captured.</div>"}
+        <h3 style="margin-top:1rem;">Failures</h3>
+        {bwd_failures}
+      </div>
+      <div class="panel">
+        <h2>AOT Autograd backward</h2>
+        <p class="section-copy">Mirrors the <code>aot_autograd_backward_compilation_metrics.html</code> surface in <code>tlparse</code>: AOT Autograd backward compilation failures.</p>
+        {aot_failures}
+      </div>
+    </div>
+    """
 
 
 def render_guard_detail(paths: TLHubPaths, run_id: str, guard_id: str) -> str:
@@ -1117,10 +2769,10 @@ def render_guard_detail(paths: TLHubPaths, run_id: str, guard_id: str) -> str:
       <div class="title">
         <div>
           <h1>{escape(guard.get('failure_type') or 'Guard detail')}</h1>
-          <p><a href="/runs/{quote(run_id)}">Run {escape(run_id)}</a> | <a href="/runs/{quote(run_id)}/compiles/{quote(guard.get('compile_dir') or '')}">{escape(guard.get('compile_id') or 'compile')}</a></p>
+          <p><a href="{app_url('/runs/' + quote(run_id))}">Run {escape(run_id)}</a> | <a href="{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(guard.get('compile_dir') or ''))}">{escape(guard.get('compile_id') or 'compile')}</a></p>
         </div>
         <div class="actions">
-          <a href="/runs/{quote(run_id)}">Back to run</a>
+          <a href="{app_url('/runs/' + quote(run_id))}">Back to run</a>
         </div>
       </div>
     </header>
@@ -1191,7 +2843,7 @@ def render_provenance_panel(
         rows.append(
             f"""
             <tr>
-              <td><a href="/runs/{quote(run_id)}/provenance/{quote(group['id'])}">{escape(group['label'])}</a></td>
+              <td><a href="{app_url('/runs/' + quote(run_id) + '/provenance/' + quote(group['id']))}">{escape(group['label'])}</a></td>
               <td>{'' if group.get('rank') is None else group['rank']}</td>
               <td class="mono">{escape(str(group.get('compile_id') or group.get('compile_dir') or 'n/a'))}</td>
               <td>{escape(", ".join(available) or "mapping only")}</td>
@@ -1293,17 +2945,17 @@ def render_provenance_detail(
         "Post -> code": len(interactive_mappings["postToCode"]),
     }
     alternate_code_link = (
-        f"<a href='/artifacts/{quote(aot_code_artifact['id'])}'>Open AOT wrapper artifact</a>"
+        f"<a href='{app_url('/artifacts/' + quote(aot_code_artifact['id']))}'>Open AOT wrapper artifact</a>"
         if code_mode == "python" and aot_code_artifact is not None
         else (
-            f"<a href='/artifacts/{quote(output_code_artifact['id'])}'>Open Python output artifact</a>"
+            f"<a href='{app_url('/artifacts/' + quote(output_code_artifact['id']))}'>Open Python output artifact</a>"
             if code_mode == "cpp" and output_code_artifact is not None
             else ""
         )
     )
     extra_links = (
         "".join(
-            f"<li><a href='/artifacts/{quote(artifact['id'])}'>{escape(artifact['title'])}</a></li>"
+            f"<li><a href='{app_url('/artifacts/' + quote(artifact['id']))}'>{escape(artifact['title'])}</a></li>"
             for artifact in extra_artifacts
         )
         if extra_artifacts
@@ -1315,10 +2967,10 @@ def render_provenance_detail(
       <div class="title">
         <div>
           <h1>{escape(group['label'])}</h1>
-          <p><a href="/runs/{quote(run_id)}">Run {escape(run_id)}</a> | <span class="mono">{escape(str(group.get('compile_id') or group.get('compile_dir') or provenance_id))}</span></p>
+          <p><a href="{app_url('/runs/' + quote(run_id))}">Run {escape(run_id)}</a> | <span class="mono">{escape(str(group.get('compile_id') or group.get('compile_dir') or provenance_id))}</span></p>
         </div>
         <div class="actions">
-          <a href="/runs/{quote(run_id)}">Back to run</a>
+          <a href="{app_url('/runs/' + quote(run_id))}">Back to run</a>
         </div>
       </div>
     </header>
@@ -1356,7 +3008,7 @@ def render_provenance_artifact_link(artifact: dict[str, Any] | None, label: str 
     if artifact is None:
         return "<span class='muted'>n/a</span>"
     text = label or artifact["title"]
-    return f"<a href='/artifacts/{quote(artifact['id'])}'>{escape(text)}</a>"
+    return f"<a href='{app_url('/artifacts/' + quote(artifact['id']))}'>{escape(text)}</a>"
 
 
 def render_provenance_surface(
@@ -1399,7 +3051,7 @@ def render_report_artifacts(report_artifacts: list[dict[str, Any]]) -> str:
     rows = "".join(
         f"""
         <tr>
-          <td><a href="/artifacts/{quote(artifact['id'])}">{escape(artifact['title'])}</a></td>
+          <td><a href="{app_url('/artifacts/' + quote(artifact['id']))}">{escape(artifact['title'])}</a></td>
           <td class="mono">{escape(artifact['relative_path'])}</td>
           <td>{escape(artifact['kind'])}</td>
           <td>{escape(format_artifact_summary(artifact['summary']))}</td>
@@ -1435,7 +3087,7 @@ def render_compile_table(run_id: str, compiles: list[dict[str, Any]]) -> str:
         rows.append(
             f"""
             <tr>
-              <td class="mono"><a href="/runs/{quote(run_id)}/compiles/{quote(compile_entry['compile_dir'])}">{escape(compile_entry['compile_id'])}</a></td>
+              <td class="mono"><a href="{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(compile_entry['compile_dir']))}">{escape(compile_entry['compile_id'])}</a></td>
               <td>{'' if compile_entry.get('rank') is None else compile_entry['rank']}</td>
               <td>{render_compile_status(compile_entry.get('status', 'missing'))}</td>
               <td>{compile_entry.get('artifact_count', 0)}</td>
@@ -1526,7 +3178,7 @@ def render_export_panel(run_id: str, export: dict[str, Any] | None) -> str:
     for failure in failures:
         detail_id = failure.get("detail_id")
         detail_link = (
-            f"<a href='/runs/{quote(run_id)}/guards/{quote(detail_id)}'>details</a>"
+            f"<a href='{app_url('/runs/' + quote(run_id) + '/guards/' + quote(detail_id))}'>details</a>"
             if detail_id
             else ""
         )
@@ -1540,7 +3192,7 @@ def render_export_panel(run_id: str, export: dict[str, Any] | None) -> str:
             """
         )
     export_link = (
-        f"<a href='/artifacts/{quote(exported_program_artifact_id)}'>View exported program</a>"
+        f"<a href='{app_url('/artifacts/' + quote(exported_program_artifact_id))}'>View exported program</a>"
         if exported_program_artifact_id
         else "<span class='muted'>No exported program artifact</span>"
     )
@@ -1562,7 +3214,7 @@ def render_vllm_panel(vllm: dict[str, Any] | None) -> str:
     piecewise = vllm.get("piecewise_graph")
     config_block = render_json_table(config)
     piecewise_link = (
-        f"<a href='/artifacts/{quote(piecewise['id'])}'>View piecewise split graph</a>"
+        f"<a href='{app_url('/artifacts/' + quote(piecewise['id']))}'>View piecewise split graph</a>"
         if piecewise and piecewise.get("id")
         else "<span class='muted'>No piecewise split graph artifact</span>"
     )
@@ -1571,7 +3223,7 @@ def render_vllm_panel(vllm: dict[str, Any] | None) -> str:
         artifacts = subgraph.get("artifacts") or []
         artifact_links = (
             "".join(
-                f"<li><a href='/artifacts/{quote(artifact['id'])}'>{escape(artifact['title'])}</a></li>"
+                f"<li><a href='{app_url('/artifacts/' + quote(artifact['id']))}'>{escape(artifact['title'])}</a></li>"
                 for artifact in artifacts
                 if artifact.get("id")
             )
@@ -1692,13 +3344,66 @@ def render_grouping_block(title: str, groups: list[dict[str, Any]]) -> str:
 
 def render_stack_trie(run_id: str, compiles: list[dict[str, Any]]) -> str:
     tree = build_stack_tree(compiles)
-    if not tree["children"]:
-        return ""
+    body = (
+        f"<div class='stack-tree'>{render_stack_tree_children(run_id, tree['children'])}</div>"
+        if tree["children"]
+        else "<div class='empty'>No compile stacks were captured in this run.</div>"
+    )
+    legend = (
+        "<div class='stack-legend'>"
+        "<span class='pill status-ok'>Success</span>"
+        "<span class='pill status-break'>Restart</span>"
+        "<span class='pill status-empty'>Empty graph</span>"
+        "<span class='pill status-error'>Error</span>"
+        "<span class='pill status-missing'>Metrics missing</span>"
+        "</div>"
+    )
     return f"""
     <div class="panel">
       <h2>Stack trie</h2>
-      <p class="section-copy">This mirrors the core `tlparse` orientation view: compile stacks are grouped into a tree so it is obvious where PT2 compilation was triggered and which compile ids share prefixes.</p>
-      <div class="stack-tree">{render_stack_tree_children(run_id, tree['children'])}</div>
+      <p class="section-copy">A tree of stack frames for every stack that triggered PT2 compilation (most recent call last). Click a compile id pill to jump to its IR dumps and metrics.</p>
+      {legend}
+      {body}
+    </div>
+    """
+
+
+def render_ir_dumps_panel(run_id: str, compiles: list[dict[str, Any]]) -> str:
+    if not compiles:
+        return ""
+    items = []
+    for compile_entry in compiles:
+        compile_dir = compile_entry.get("compile_dir") or ""
+        compile_id = compile_entry.get("compile_id") or compile_dir
+        status = compile_entry.get("status", "missing")
+        artifacts = compile_entry.get("artifacts") or []
+        artifact_list = (
+            "<div class='muted mini-note'>No artifacts emitted for this compile.</div>"
+            if not artifacts
+            else "<ul class='mono-list ir-artifacts'>" + "".join(
+                f"<li><a href='{app_url('/artifacts/' + quote(artifact['id']))}'>"
+                f"{escape(artifact['relative_path'].split('/')[-1])}</a>"
+                f" <span class='mini-note muted'>({escape(str(artifact.get('event_type') or ''))})</span></li>"
+                for artifact in artifacts
+            ) + "</ul>"
+        )
+        compile_link = app_url("/runs/" + quote(run_id) + "/compiles/" + quote(compile_dir))
+        items.append(
+            f"""
+            <li class="ir-compile">
+              <div class="ir-compile-head">
+                <a class="ir-compile-id pill {status_class(status)}" href="{compile_link}">{escape(compile_id)}</a>
+                <span class="muted mini-note">{len(artifacts)} file{'s' if len(artifacts) != 1 else ''}</span>
+              </div>
+              {artifact_list}
+            </li>
+            """
+        )
+    return f"""
+    <div class="panel">
+      <h2>IR dumps</h2>
+      <p class="section-copy">Every compile id, with the intermediate products it emitted. Click a compile id for metrics, stack, and provenance; click a file to open it directly.</p>
+      <ul class="ir-list">{''.join(items)}</ul>
     </div>
     """
 
@@ -1748,7 +3453,7 @@ def render_stack_tree_children(run_id: str, children: dict[str, Any]) -> str:
     for child in children.values():
         frame_html = render_frame_label(child["frame"])
         compile_links = "".join(
-            f" <a class='pill {status_class(item.get('status'))}' href='/runs/{quote(run_id)}/compiles/{quote(item['compile_dir'])}'>{escape(item['compile_id'])}</a>"
+            f" <a class='pill {status_class(item.get('status'))}' href='{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(item['compile_dir']))}'>{escape(item['compile_id'])}</a>"
             for item in child.get("compiles", [])
         )
         nested = render_stack_tree_children(run_id, child.get("children", {}))
@@ -1796,7 +3501,7 @@ def render_compile_artifacts(artifacts: list[dict[str, Any]]) -> str:
     if not artifacts:
         return "<div class='muted'>No output files recorded.</div>"
     rows = "".join(
-        f"<li><a href='/artifacts/{quote(artifact['id'])}'>{escape(artifact['relative_path'].split('/')[-1])}</a> <span class='mini-note'>({artifact['number']})</span></li>"
+        f"<li><a href='{app_url('/artifacts/' + quote(artifact['id']))}'>{escape(artifact['relative_path'].split('/')[-1])}</a> <span class='mini-note'>({artifact['number']})</span></li>"
         for artifact in artifacts
     )
     return f"<ul class='mono-list'>{rows}</ul>"
@@ -1823,7 +3528,7 @@ def render_compile_guard_links(run_id: str, compile_entry: dict[str, Any], manif
     if not guard_ids:
         return ""
     rows = "".join(
-        f"<li><a href='/runs/{quote(run_id)}/guards/{quote(guard_id)}'>{escape(guard_id)}</a></li>"
+        f"<li><a href='{app_url('/runs/' + quote(run_id) + '/guards/' + quote(guard_id))}'>{escape(guard_id)}</a></li>"
         for guard_id in guard_ids
     )
     return f"<div style='margin-top:1rem;'><div class='mini-note'>Export guard details</div><ul class='mono-list'>{rows}</ul></div>"
@@ -1849,7 +3554,7 @@ def render_compile_provenance_links(
     if not matches:
         return ""
     rows = "".join(
-        f"<li><a href='/runs/{quote(run_id)}/provenance/{quote(group['id'])}'>{escape(group['label'])}</a></li>"
+        f"<li><a href='{app_url('/runs/' + quote(run_id) + '/provenance/' + quote(group['id']))}'>{escape(group['label'])}</a></li>"
         for group in matches
     )
     return f"<div style='margin-top:1rem;'><div class='mini-note'>Provenance tracking</div><ul class='mono-list'>{rows}</ul></div>"
@@ -2013,7 +3718,7 @@ def render_compare_picker(
     return f"""
     <div class="panel">
       <h2>Compare</h2>
-      <form action="/compare" method="get" class="toolbar">
+      <form action="{app_url('/compare')}" method="get" class="toolbar">
         <label>Left run <select name="left_run">{left_options}</select></label>
         <label>Right run <select name="right_run">{right_options}</select></label>
         <label>Family filter <input type="text" name="family" value="{escape(family)}" placeholder="optional substring"></label>
@@ -2035,7 +3740,7 @@ def render_arbitrary_diff_picker(
     return f"""
     <div class="panel">
       <h2>Pick any two artifacts</h2>
-      <form action="/diff" method="get" class="stack">
+      <form action="{app_url('/diff')}" method="get" class="stack">
         <label>Left artifact <select name="left">{left_options}</select></label>
         <label>Right artifact <select name="right">{right_options}</select></label>
         <button type="submit">Diff artifacts</button>
@@ -2060,7 +3765,7 @@ def render_match_table(
         right = right_map.get(key)
         if left and right:
             state = "same" if left["sha256"] == right["sha256"] else "changed"
-            action = f"<a href='/diff?{urlencode({'left': left['id'], 'right': right['id']})}'>Diff</a>"
+            action = f"<a href='{app_url('/diff', query={'left': left['id'], 'right': right['id']})}'>Diff</a>"
         else:
             state = "missing"
             action = ""
@@ -2096,13 +3801,13 @@ def render_match_table(
 
 
 def render_run_row(run: dict[str, Any], manifest: dict[str, Any] | None) -> str:
-    compare_url = "/compare?" + urlencode({"left_run": run["id"]})
-    delete_action = f"/runs/{quote(run['id'])}/delete"
+    compare_url = app_url("/compare", query={"left_run": run["id"]})
+    delete_action = app_url("/runs/" + quote(run["id"]) + "/delete")
     compile_count = manifest.get("compile_count", 0) if manifest else 0
     rank_count = format_rank_count(manifest.get("multi_rank") if manifest else None)
     return f"""
     <tr>
-      <td class="mono"><a href="/runs/{quote(run['id'])}">{escape(run['id'])}</a></td>
+      <td class="mono"><a href="{app_url('/runs/' + quote(run['id']))}">{escape(run['id'])}</a></td>
       <td>{render_status(run['status'])}</td>
       <td class="mono">{escape(trim(run['command_display'], 88))}</td>
       <td>{escape(run['started_at'])}</td>
@@ -2113,7 +3818,7 @@ def render_run_row(run: dict[str, Any], manifest: dict[str, Any] | None) -> str:
       <td>{'' if run['exit_code'] is None else run['exit_code']}</td>
       <td>
         <div class="actions">
-          <a href="/runs/{quote(run['id'])}">View</a>
+          <a href="{app_url('/runs/' + quote(run['id']))}">View</a>
           <a href="{compare_url}">Compare</a>
           <form class="inline" action="{delete_action}" method="post">
             <button class="danger" type="submit">Delete</button>
@@ -2125,20 +3830,23 @@ def render_run_row(run: dict[str, Any], manifest: dict[str, Any] | None) -> str:
 
 
 def render_artifact_row(artifact: dict[str, Any]) -> str:
-    compare_url = "/compare?" + urlencode({"left_run": artifact["run_id"], "family": artifact["family"]})
+    compare_url = app_url(
+        "/compare",
+        query={"left_run": artifact["run_id"], "family": artifact["family"]},
+    )
     origin = f"{artifact['log_file']}:{artifact['line_no']}"
     if artifact["compile_id"]:
         origin += f" | {artifact['compile_id']}"
     return f"""
     <tr>
-      <td><a href="/artifacts/{quote(artifact['id'])}">{escape(artifact['title'])}</a></td>
+      <td><a href="{app_url('/artifacts/' + quote(artifact['id']))}">{escape(artifact['title'])}</a></td>
       <td class="mono">{escape(artifact['match_key'])}</td>
       <td>{escape(artifact['kind'])}</td>
       <td class="mono">{escape(origin)}</td>
       <td>{escape(format_artifact_summary(artifact['summary']))}</td>
       <td>
         <div class="actions">
-          <a href="/artifacts/{quote(artifact['id'])}">View</a>
+          <a href="{app_url('/artifacts/' + quote(artifact['id']))}">View</a>
           <a href="{compare_url}">Compare family</a>
         </div>
       </td>
@@ -2155,7 +3863,7 @@ def render_matched_artifact_cell(artifact: dict[str, Any] | None) -> str:
     if artifact is None:
         return "<span class='muted'>missing</span>"
     return (
-        f"<a href='/artifacts/{quote(artifact['id'])}'>{escape(artifact['title'])}</a>"
+        f"<a href='{app_url('/artifacts/' + quote(artifact['id']))}'>{escape(artifact['title'])}</a>"
         f"<div class='muted mono'>{escape(artifact['relative_path'])}</div>"
     )
 
@@ -2186,7 +3894,7 @@ def render_diff_side(label: str, artifact: dict[str, Any]) -> str:
       <h2>{escape(label)}</h2>
       <div class="summary-list">
         <div><span class="muted">Artifact</span><span>{escape(artifact['title'])}</span></div>
-        <div><span class="muted">Run</span><span class="mono"><a href="/runs/{quote(artifact['run_id'])}">{escape(artifact['run_id'])}</a></span></div>
+        <div><span class="muted">Run</span><span class="mono"><a href="{app_url('/runs/' + quote(artifact['run_id']))}">{escape(artifact['run_id'])}</a></span></div>
         <div><span class="muted">Match key</span><span class="mono">{escape(artifact['match_key'])}</span></div>
         <div><span class="muted">Path</span><span class="mono">{escape(artifact['relative_path'])}</span></div>
         <div><span class="muted">SHA</span><span class="mono">{escape(artifact['sha256'][:16])}</span></div>
@@ -2213,56 +3921,6 @@ def render_semantic_diff(
     left_text: str,
     right_text: str,
 ) -> str:
-    if left_artifact.get("kind") == right_artifact.get("kind") == "fx_graph":
-        graph_diff = build_fx_graph_diff(left_text, right_text)
-        if graph_diff is None:
-            return ""
-        added = "".join(
-            f"<li><span class='mono'>{escape(item['name'])}</span> <span class='muted'>{escape(item['target'])}</span></li>"
-            for item in graph_diff["added"][:24]
-        ) or "<li class='muted'>No added nodes.</li>"
-        removed = "".join(
-            f"<li><span class='mono'>{escape(item['name'])}</span> <span class='muted'>{escape(item['target'])}</span></li>"
-            for item in graph_diff["removed"][:24]
-        ) or "<li class='muted'>No removed nodes.</li>"
-        changed = "".join(
-            f"<tr><td class='mono'>{escape(item['name'])}</td><td class='mono'>{escape(item['left']['target'])}</td><td class='mono'>{escape(item['right']['target'])}</td></tr>"
-            for item in graph_diff["changed"][:40]
-        )
-        changed_block = (
-            "<div class='muted'>No node-level target changes.</div>"
-            if not changed
-            else f"<table class='data'><thead><tr><th>Node</th><th>Left target</th><th>Right target</th></tr></thead><tbody>{changed}</tbody></table>"
-        )
-        return f"""
-        <div class="panel">
-          <h2>Graph structure diff</h2>
-          <p class="section-copy">This diff is semantic rather than text-only: FX nodes are parsed and compared by name and emitted target so you can spot graph-shape changes faster than reading raw line diffs.</p>
-          <div class="kpis">
-            <div class="kpi"><span class="label">Left nodes</span><span class="value">{graph_diff['left_count']}</span></div>
-            <div class="kpi"><span class="label">Right nodes</span><span class="value">{graph_diff['right_count']}</span></div>
-            <div class="kpi"><span class="label">Added</span><span class="value">{len(graph_diff['added'])}</span></div>
-            <div class="kpi"><span class="label">Removed</span><span class="value">{len(graph_diff['removed'])}</span></div>
-            <div class="kpi"><span class="label">Changed</span><span class="value">{len(graph_diff['changed'])}</span></div>
-            <div class="kpi"><span class="label">Order changed</span><span class="value">{'yes' if graph_diff['order_changed'] else 'no'}</span></div>
-          </div>
-          <div class="grid-2" style="margin-top:1rem;">
-            <div class="panel">
-              <h3>Added nodes</h3>
-              <ul class="mono-list">{added}</ul>
-            </div>
-            <div class="panel">
-              <h3>Removed nodes</h3>
-              <ul class="mono-list">{removed}</ul>
-            </div>
-          </div>
-          <div class="panel" style="margin-top:1rem;">
-            <h3>Changed nodes</h3>
-            {changed_block}
-          </div>
-        </div>
-        """
-
     if left_artifact.get("kind") == right_artifact.get("kind") == "json":
         json_diff = build_json_diff(left_text, right_text)
         if json_diff is None:
@@ -2295,13 +3953,233 @@ def read_artifact_text(paths: TLHubPaths, artifact: dict[str, Any]) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def render_source_block(text: str) -> str:
+def render_side_by_side_diff(
+    left_text: str,
+    right_text: str,
+    *,
+    left_title: str = "Left",
+    right_title: str = "Right",
+    context: int = 3,
+) -> str:
+    left_lines = left_text.splitlines()
+    right_lines = right_text.splitlines()
+    matcher = difflib.SequenceMatcher(a=left_lines, b=right_lines, autojunk=False)
+    opcodes = matcher.get_opcodes()
+    if not opcodes:
+        return "<div class='empty'>Both files are empty.</div>"
+
+    rows: list[str] = []
+    any_change = any(tag != "equal" for tag, *_ in opcodes)
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            length = i2 - i1
+            if any_change and length > context * 2 + 1:
+                for k in range(context):
+                    rows.append(_sxs_row("equal", i1 + k, j1 + k, left_lines[i1 + k], right_lines[j1 + k]))
+                rows.append(_sxs_spacer(length - context * 2))
+                start = length - context
+                for k in range(context):
+                    rows.append(
+                        _sxs_row(
+                            "equal",
+                            i1 + start + k,
+                            j1 + start + k,
+                            left_lines[i1 + start + k],
+                            right_lines[j1 + start + k],
+                        )
+                    )
+            else:
+                for k in range(length):
+                    rows.append(_sxs_row("equal", i1 + k, j1 + k, left_lines[i1 + k], right_lines[j1 + k]))
+        elif tag == "replace":
+            left_block = left_lines[i1:i2]
+            right_block = right_lines[j1:j2]
+            max_len = max(len(left_block), len(right_block))
+            for k in range(max_len):
+                l_line = left_block[k] if k < len(left_block) else None
+                r_line = right_block[k] if k < len(right_block) else None
+                rows.append(
+                    _sxs_row(
+                        "replace",
+                        (i1 + k) if l_line is not None else None,
+                        (j1 + k) if r_line is not None else None,
+                        l_line if l_line is not None else "",
+                        r_line if r_line is not None else "",
+                        left_kind="delete" if l_line is not None else "blank",
+                        right_kind="insert" if r_line is not None else "blank",
+                    )
+                )
+        elif tag == "delete":
+            for k in range(i2 - i1):
+                rows.append(
+                    _sxs_row(
+                        "delete",
+                        i1 + k,
+                        None,
+                        left_lines[i1 + k],
+                        "",
+                        left_kind="delete",
+                        right_kind="blank",
+                    )
+                )
+        elif tag == "insert":
+            for k in range(j2 - j1):
+                rows.append(
+                    _sxs_row(
+                        "insert",
+                        None,
+                        j1 + k,
+                        "",
+                        right_lines[j1 + k],
+                        left_kind="blank",
+                        right_kind="insert",
+                    )
+                )
+
+    if not any_change:
+        return "<div class='empty'>Files are identical.</div>"
+
+    rows_html = "".join(rows)
+    return f"""
+    <div class="sxs-wrap">
+      <div class="sxs-head">
+        <div class="sxs-head-cell">{escape(left_title)}</div>
+        <div class="sxs-head-cell">{escape(right_title)}</div>
+      </div>
+      <table class="sxs-diff"><tbody>{rows_html}</tbody></table>
+    </div>
+    """
+
+
+def _sxs_row(
+    tag: str,
+    left_num: int | None,
+    right_num: int | None,
+    left_text: str,
+    right_text: str,
+    *,
+    left_kind: str | None = None,
+    right_kind: str | None = None,
+) -> str:
+    left_kind = left_kind or tag
+    right_kind = right_kind or tag
+    l_num = "" if left_num is None else str(left_num + 1)
+    r_num = "" if right_num is None else str(right_num + 1)
+    return (
+        f"<tr class='sxs-row sxs-{escape(tag)}'>"
+        f"<td class='sxs-ln sxs-ln-l sxs-{escape(left_kind)}'>{l_num}</td>"
+        f"<td class='sxs-text sxs-{escape(left_kind)}'>{escape(left_text) if left_text else '&nbsp;'}</td>"
+        f"<td class='sxs-ln sxs-ln-r sxs-{escape(right_kind)}'>{r_num}</td>"
+        f"<td class='sxs-text sxs-{escape(right_kind)}'>{escape(right_text) if right_text else '&nbsp;'}</td>"
+        f"</tr>"
+    )
+
+
+def _sxs_spacer(skipped: int) -> str:
+    return (
+        f"<tr class='sxs-spacer'>"
+        f"<td colspan='4'>&middot; &middot; &middot; {skipped} unchanged line{'s' if skipped != 1 else ''} &middot; &middot; &middot;</td>"
+        f"</tr>"
+    )
+
+
+def render_source_block(text: str, language: str = "plain") -> str:
     lines = text.splitlines() or [""]
     rows = "".join(
-        f"<tr id='L{index}'><td class='ln'><a href='#L{index}'>{index}</a></td><td class='code'><code>{escape(line) if line else '&nbsp;'}</code></td></tr>"
+        f"<tr id='L{index}'><td class='ln'><a href='#L{index}'>{index}</a></td>"
+        f"<td class='code'><code class='hl-{escape(language)}'>{_highlight_line(line, language)}</code></td></tr>"
         for index, line in enumerate(lines, start=1)
     )
     return f"<table class='source'><tbody>{rows}</tbody></table>"
+
+
+_PY_KEYWORDS = frozenset(
+    {
+        "and", "as", "assert", "async", "await", "break", "class", "continue",
+        "def", "del", "elif", "else", "except", "finally", "for", "from",
+        "global", "if", "import", "in", "is", "lambda", "nonlocal", "not",
+        "or", "pass", "raise", "return", "try", "while", "with", "yield",
+        "match", "case",
+    }
+)
+_PY_CONSTANTS = frozenset({"True", "False", "None", "self", "cls"})
+_PY_BUILTINS = frozenset(
+    {
+        "print", "len", "range", "enumerate", "zip", "map", "filter", "list",
+        "dict", "tuple", "set", "int", "float", "str", "bool", "bytes",
+        "object", "type", "isinstance", "issubclass", "hasattr", "getattr",
+        "setattr", "repr", "super", "abs", "min", "max", "sum", "any", "all",
+        "iter", "next", "sorted", "reversed", "round", "open", "input",
+    }
+)
+
+_PY_TOKEN_RE = re.compile(
+    r"(?P<comment>\#[^\n]*)"
+    r"|(?P<string>r?b?\"(?:\\.|[^\"\\])*\"|r?b?'(?:\\.|[^'\\])*')"
+    r"|(?P<number>\b(?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?j?)\b)"
+    r"|(?P<decor>@[A-Za-z_][\w.]*)"
+    r"|(?P<fxname>%[A-Za-z_]\w*)"
+    r"|(?P<name>\b[A-Za-z_]\w*\b)"
+    r"|(?P<op>[+\-*/%=<>!&|^~]+|->)"
+)
+
+_JSON_TOKEN_RE = re.compile(
+    r"(?P<string>\"(?:\\.|[^\"\\])*\")"
+    r"|(?P<number>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+    r"|(?P<keyword>\b(?:true|false|null)\b)"
+    r"|(?P<punct>[\{\}\[\],:])"
+)
+
+
+def _highlight_line(line: str, language: str) -> str:
+    if not line:
+        return "&nbsp;"
+    if language == "python" or language == "fx":
+        return _apply_regex(line, _PY_TOKEN_RE, language)
+    if language == "json":
+        return _apply_regex(line, _JSON_TOKEN_RE, language)
+    return escape(line)
+
+
+def _apply_regex(line: str, regex: re.Pattern[str], language: str) -> str:
+    out: list[str] = []
+    pos = 0
+    for match in regex.finditer(line):
+        if match.start() > pos:
+            out.append(escape(line[pos : match.start()]))
+        token = match.group()
+        group = match.lastgroup or ""
+        cls = group
+        if group == "name":
+            if token in _PY_KEYWORDS:
+                cls = "keyword"
+            elif token in _PY_CONSTANTS:
+                cls = "const"
+            elif token in _PY_BUILTINS:
+                cls = "builtin"
+            elif match.end() < len(line) and line[match.end()] == "(":
+                cls = "func"
+        elif group == "fxname":
+            cls = "fxname"
+        elif group == "decor":
+            cls = "decor"
+        out.append(f"<span class='hl-{cls}'>{escape(token)}</span>")
+        pos = match.end()
+    if pos < len(line):
+        out.append(escape(line[pos:]))
+    return "".join(out)
+
+
+def detect_language(artifact: dict[str, Any]) -> str:
+    kind = (artifact.get("kind") or "").lower()
+    relative_path = (artifact.get("relative_path") or "").lower()
+    if kind == "inductor_output_code" or relative_path.endswith(".py"):
+        return "python"
+    if kind in {"json", "manifest_json"} or relative_path.endswith(".json"):
+        return "json"
+    if kind == "fx_graph" or "graph" in kind:
+        return "fx"
+    return "plain"
 
 
 def format_artifact_summary(summary: dict[str, Any]) -> str:
@@ -2323,6 +4201,75 @@ def format_summary_value(value: Any) -> str:
     if value is None:
         return "n/a"
     return str(value)
+
+
+def render_command_subtitle(command: str) -> str:
+    collapsed = " ".join(command.split())
+    return (
+        f"<div class='workspace-subtitle' title='{escape(command)}'>"
+        f"{escape(collapsed)}"
+        "</div>"
+    )
+
+
+def format_timestamp(value: str | None) -> str:
+    if not value:
+        return "n/a"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.strftime("%b %d, %Y %H:%M:%S")
+
+
+def format_sidebar_time(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    if parsed.date() == now.date():
+        return parsed.strftime("today %H:%M")
+    delta = now - parsed
+    if delta.days < 7 and delta.days >= 0:
+        return parsed.strftime("%a %H:%M")
+    return parsed.strftime("%b %d %H:%M")
+
+
+def summarize_command(run: dict[str, Any]) -> str:
+    command = run.get("command") or []
+    if not command:
+        display = run.get("command_display") or run.get("id") or ""
+        return trim(display, 48)
+
+    first = str(command[0]).rsplit("/", 1)[-1] or str(command[0])
+    rest = list(command[1:])
+
+    if first.startswith("python") or first in {"python", "uv", "pytest", "pipx", "pip"}:
+        i = 0
+        while i < len(rest):
+            arg = str(rest[i])
+            if arg.endswith(".py") or arg.endswith(".ipynb"):
+                return arg.rsplit("/", 1)[-1]
+            if arg == "-m" and i + 1 < len(rest):
+                return f"-m {rest[i + 1]}"
+            if arg == "-c" and i + 1 < len(rest):
+                snippet = str(rest[i + 1]).splitlines()[0] if rest[i + 1] else ""
+                return f"-c {trim(snippet, 36)}"
+            i += 1
+
+    pieces = [first] + [str(arg).rsplit("/", 1)[-1] for arg in rest[:2]]
+    return trim(" ".join(part for part in pieces if part), 48)
+
+
+def format_bytes(count: int) -> str:
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.1f} KB"
+    return f"{count / (1024 * 1024):.1f} MB"
 
 
 def format_duration(duration_ms: int | None) -> str:

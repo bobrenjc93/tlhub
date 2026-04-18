@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tlhub import cli  # noqa: E402
-from tlhub.config import get_paths  # noqa: E402
+from tlhub.config import BASE_URL_ENV, build_app_url, build_user_url, get_paths  # noqa: E402
 from tlhub.database import Repository, RunCreate  # noqa: E402
 from tlhub import server  # noqa: E402
 from tlhub.trace_parser import ingest_trace_dir  # noqa: E402
@@ -96,6 +96,40 @@ def run_http_server(paths, repo):
 
 
 class TLHubTests(unittest.TestCase):
+    def test_build_user_url_uses_base_url_host_path_and_runtime_port(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {BASE_URL_ENV: "https://proxy.example.com/reviewer?via=ssh"},
+            clear=False,
+        ):
+            self.assertEqual(
+                build_user_url(9237),
+                "https://proxy.example.com:9237/reviewer?via=ssh",
+            )
+            self.assertEqual(
+                build_user_url(9237, "/runs/run-1"),
+                "https://proxy.example.com:9237/reviewer/runs/run-1?via=ssh",
+            )
+
+    def test_build_user_url_rejects_invalid_base_url(self) -> None:
+        with mock.patch.dict(os.environ, {BASE_URL_ENV: "proxy.example.com"}, clear=False):
+            with self.assertRaisesRegex(
+                ValueError,
+                "BASE_URL must be a full URL like http://example.com.",
+            ):
+                build_user_url(9234)
+
+    def test_build_app_url_preserves_base_query(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {BASE_URL_ENV: "https://proxy.example.com/reviewer?via=ssh"},
+            clear=False,
+        ):
+            self.assertEqual(
+                build_app_url("/compare", query={"left_run": "run-1"}),
+                "/reviewer/compare?via=ssh&left_run=run-1",
+            )
+
     def test_ingest_trace_dir_extracts_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             trace_dir = Path(tmpdir) / "trace"
@@ -248,6 +282,74 @@ class TLHubTests(unittest.TestCase):
                 ensure_running.assert_called_once()
                 open_browser.assert_called_once_with("http://127.0.0.1:9999", new=2)
 
+    def test_ensure_daemon_running_rewrites_with_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "TLHUB_HOME": tmpdir,
+                    BASE_URL_ENV: "https://proxy.example.com/reviewer?via=ssh",
+                },
+                clear=False,
+            ):
+                paths = get_paths()
+                paths.daemon_version_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.daemon_version_path.write_text(cli.__version__, encoding="utf-8")
+                with mock.patch(
+                    "tlhub.cli.daemon_status",
+                    return_value=(True, "http://127.0.0.1:9345"),
+                ):
+                    url = cli.ensure_daemon_running(paths, preferred_port=9234)
+
+        self.assertEqual(url, "https://proxy.example.com:9345/reviewer?via=ssh")
+
+    def test_ensure_daemon_running_restarts_mismatched_daemon_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                paths.daemon_pid_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.daemon_pid_path.write_text("4321", encoding="utf-8")
+                paths.daemon_version_path.write_text("0.0.0", encoding="utf-8")
+
+                with mock.patch(
+                    "tlhub.cli.daemon_status",
+                    return_value=(True, "http://127.0.0.1:9345"),
+                ):
+                    with mock.patch("tlhub.cli.process_exists", return_value=True):
+                        with mock.patch("tlhub.cli.stop_daemon", return_value=True) as stop_daemon:
+                            with mock.patch(
+                                "tlhub.cli.start_daemon",
+                                return_value="http://127.0.0.1:9456",
+                            ) as start_daemon:
+                                url = cli.ensure_daemon_running(paths, preferred_port=9234)
+
+        self.assertEqual(url, "http://127.0.0.1:9456")
+        stop_daemon.assert_called_once_with(paths)
+        start_daemon.assert_called_once_with(paths, preferred_port=9234)
+
+    def test_ensure_daemon_running_restarts_daemon_without_version_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                paths.daemon_pid_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.daemon_pid_path.write_text("4321", encoding="utf-8")
+
+                with mock.patch(
+                    "tlhub.cli.daemon_status",
+                    return_value=(True, "http://127.0.0.1:9345"),
+                ):
+                    with mock.patch("tlhub.cli.process_exists", return_value=True):
+                        with mock.patch("tlhub.cli.stop_daemon", return_value=True) as stop_daemon:
+                            with mock.patch(
+                                "tlhub.cli.start_daemon",
+                                return_value="http://127.0.0.1:9456",
+                            ) as start_daemon:
+                                url = cli.ensure_daemon_running(paths, preferred_port=9234)
+
+        self.assertEqual(url, "http://127.0.0.1:9456")
+        stop_daemon.assert_called_once_with(paths)
+        start_daemon.assert_called_once_with(paths, preferred_port=9234)
+
     def test_cli_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
@@ -390,9 +492,9 @@ class TLHubTests(unittest.TestCase):
                     paths,
                     {"left": [left["id"]], "right": [right["id"]]},
                 )
-                self.assertIn("Graph structure diff", diff_html)
-                self.assertIn("Added nodes", diff_html)
-                self.assertIn("Removed nodes", diff_html)
+                self.assertIn("Side-by-side diff", diff_html)
+                self.assertIn("sxs-delete", diff_html)
+                self.assertIn("sxs-insert", diff_html)
 
     def test_http_routes_cover_provenance_and_diff(self) -> None:
         provenance_fixture = Path("/tmp/tlparse-upstream/tests/inputs/inductor_provenance_aot_log.txt")
@@ -462,7 +564,52 @@ class TLHubTests(unittest.TestCase):
                     diff_html = response.read().decode("utf-8")
                     conn.close()
                     self.assertEqual(response.status, 200)
-                    self.assertIn("Graph structure diff", diff_html)
+                    self.assertIn("Side-by-side diff", diff_html)
+
+    def test_http_routes_support_base_url_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "TLHUB_HOME": tmpdir,
+                    BASE_URL_ENV: "https://proxy.example.com/reviewer?via=ssh",
+                },
+                clear=False,
+            ):
+                paths = get_paths()
+                repo = Repository(paths)
+                run_id = "prefix-run"
+                trace_dir = paths.runs_dir / run_id / "trace"
+                artifacts_dir = paths.runs_dir / run_id / "artifacts"
+                trace_dir.mkdir(parents=True, exist_ok=True)
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+                log_text = emit_event(
+                    '"dynamo_output_graph": {}, "frame_id": 0, "frame_compile_id": 0, "attempt": 0',
+                    "graph():\n    %x = placeholder[target=x]\n    return x",
+                )
+                (trace_dir / "trace.log").write_text(log_text, encoding="utf-8")
+                index_run(repo, run_id, trace_dir, artifacts_dir)
+
+                with run_http_server(paths, repo) as httpd:
+                    host, port = httpd.server_address
+
+                    conn = http.client.HTTPConnection(host, port)
+                    conn.request("GET", "/reviewer/")
+                    response = conn.getresponse()
+                    dashboard_html = response.read().decode("utf-8")
+                    conn.close()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("/reviewer/compare?via=ssh", dashboard_html)
+                    self.assertIn("/reviewer/runs/prefix-run?via=ssh", dashboard_html)
+
+                    conn = http.client.HTTPConnection(host, port)
+                    conn.request("GET", "/reviewer/runs/prefix-run")
+                    response = conn.getresponse()
+                    run_html = response.read().decode("utf-8")
+                    conn.close()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("Run prefix-run", run_html)
 
 
 if __name__ == "__main__":
