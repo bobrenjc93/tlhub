@@ -260,6 +260,43 @@ class TLHubTests(unittest.TestCase):
                 self.assertIn(compiles[0]["log_file"], compile_html)
                 self.assertNotIn(compiles[1]["log_file"], compile_html)
 
+    def test_expanded_run_sidebar_shows_full_command_display(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                repo = Repository(paths)
+                run_id = "long-command-run"
+                command = [
+                    "./run_train.sh",
+                    "--compile.mode",
+                    "aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--training.steps",
+                    "10",
+                    "--dataloader.dataset",
+                    "c4_test",
+                    "--compile.debug_graph_passes",
+                ]
+                repo.create_run(
+                    RunCreate(
+                        id=run_id,
+                        status="running",
+                        command=command,
+                        command_display=" ".join(command),
+                        cwd=tmpdir,
+                        hostname="test-host",
+                        trace_dir=str(Path(tmpdir) / "trace"),
+                        created_at="2026-04-20T22:47:00",
+                        started_at="2026-04-20T22:47:00",
+                    )
+                )
+
+                sidebar_html = server.render_workspace_sidebar(repo, paths, selected_run_id=run_id)
+                self.assertIn("tree-run-command", sidebar_html)
+                self.assertIn("--parallelism.tensor_parallel_degree=2", sidebar_html)
+                self.assertIn("--compile.debug_graph_passes", sidebar_html)
+
     def test_cli_wrapper_records_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             script_path = Path(tmpdir) / "emit_trace.py"

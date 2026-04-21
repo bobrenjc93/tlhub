@@ -867,6 +867,16 @@ pre.unified {
   font-size: 0.72rem;
   color: var(--muted);
 }
+.tree-run-command {
+  display: none;
+  padding: 0 0.3rem 0.45rem 1.85rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.tree-node.node-run.open > .tree-run-command { display: block; }
 .tree-time {
   color: var(--text);
   font-weight: 600;
@@ -1548,8 +1558,6 @@ CTX_MENU_SCRIPT = """
     const node = targetNode;
     hide();
     if (action === 'delete-run' && runId) {
-      const confirmed = window.confirm(`Delete run ${runId}?\\n\\nThis removes the database entry and trace files on disk.`);
-      if (!confirmed) return;
       try {
         const url = `${base}/runs/${encodeURIComponent(runId)}/delete`;
         const response = await fetch(url, {
@@ -2293,6 +2301,7 @@ def render_run_tree_node(
     warning_badge = f"<span class='tree-warn' title='{warning_count} warning(s)'>{warning_count}&#9888;</span>" if warning_count else ""
     summary_label = summarize_command(run)
     when_label = format_sidebar_time(run.get("started_at"))
+    full_command = str(run.get("command_display") or "").strip()
     tooltip = f"{run_id}\n{run.get('command_display', '')}".strip()
     meta_parts = []
     if when_label:
@@ -2302,6 +2311,11 @@ def render_run_tree_node(
         meta_parts.append(warning_badge)
     meta_parts.append(f"<span class='mono run-id-chip muted' title='{escape(run_id)}'>{escape(run_id[-8:])}</span>")
     sub_meta = "".join(meta_parts)
+    command_block = (
+        f"<div class='tree-run-command mono' title='{escape(full_command)}'>{escape(full_command)}</div>"
+        if full_command
+        else ""
+    )
     return f"""
     <li class="tree-node node-run{open_class}" data-tree-node data-run-id="{escape(run_id)}">
       <div class="tree-row">
@@ -2315,6 +2329,7 @@ def render_run_tree_node(
         </a>
       </div>
       <div class="tree-run-sub">{sub_meta}</div>
+      {command_block}
       <ul class="tree-children">{children_html}</ul>
     </li>
     """
