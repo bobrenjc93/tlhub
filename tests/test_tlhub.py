@@ -210,6 +210,56 @@ class TLHubTests(unittest.TestCase):
             ]
             self.assertEqual(keys, ["dynamo_output_graph@1", "dynamo_output_graph@2"])
 
+    def test_multi_log_run_keeps_compile_entries_separate_and_groups_sidebar_by_log_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                repo = Repository(paths)
+                run_id = "multi-log-run"
+                trace_dir = paths.runs_dir / run_id / "trace"
+                artifacts_dir = paths.runs_dir / run_id / "artifacts"
+                trace_dir.mkdir(parents=True, exist_ok=True)
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+                (trace_dir / "dedicated_log_torch_trace_rank_0_aaaa.log").write_text(
+                    emit_event(
+                        '"dynamo_output_graph": {}, "rank": 0, "frame_id": 0, "frame_compile_id": 0, "attempt": 0',
+                        "graph():\n    %x = placeholder[target=x]\n    return x",
+                    ),
+                    encoding="utf-8",
+                )
+                (trace_dir / "dedicated_log_torch_trace_rank_1_bbbb.log").write_text(
+                    emit_event(
+                        '"dynamo_output_graph": {}, "rank": 1, "frame_id": 0, "frame_compile_id": 0, "attempt": 0',
+                        "graph():\n    %y = placeholder[target=y]\n    return y",
+                    ),
+                    encoding="utf-8",
+                )
+                index_run(repo, run_id, trace_dir, artifacts_dir)
+
+                manifest = server.load_run_manifest(paths, run_id)
+                assert manifest is not None
+                compiles = manifest["compiles"]
+                self.assertEqual(len(compiles), 2)
+                self.assertEqual(
+                    {entry["log_file"] for entry in compiles},
+                    {
+                        "dedicated_log_torch_trace_rank_0_aaaa.log",
+                        "dedicated_log_torch_trace_rank_1_bbbb.log",
+                    },
+                )
+                self.assertEqual(len({entry["entry_id"] for entry in compiles}), 2)
+
+                sidebar_html = server.render_workspace_sidebar(repo, paths, selected_run_id=run_id)
+                self.assertIn("dedicated_log_torch_trace_rank_0_aaaa.log", sidebar_html)
+                self.assertIn("dedicated_log_torch_trace_rank_1_bbbb.log", sidebar_html)
+                self.assertIn(compiles[0]["entry_id"], sidebar_html)
+                self.assertIn(compiles[1]["entry_id"], sidebar_html)
+
+                compile_html = server.render_compile_detail(repo, paths, run_id, compiles[0]["entry_id"])
+                self.assertIn(compiles[0]["log_file"], compile_html)
+                self.assertNotIn(compiles[1]["log_file"], compile_html)
+
     def test_cli_wrapper_records_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             script_path = Path(tmpdir) / "emit_trace.py"
@@ -375,6 +425,37 @@ class TLHubTests(unittest.TestCase):
         self.assertIn("failed to start tlhub daemon: daemon process exited with code 1", message)
         self.assertIn(str(paths.daemon_log_path), message)
         self.assertIn("RuntimeError: bind failed", message)
+
+    def test_compile_provenance_links_match_log_scope(self) -> None:
+        html = server.render_compile_provenance_links(
+            "run-1",
+            {
+                "compile_id": "[0/0]",
+                "compile_dir": "-_0_0_0",
+                "log_file": "dedicated_log_torch_trace_rank_0_aaaa.log",
+                "rank": 0,
+            },
+            [
+                {
+                    "id": "prov-1",
+                    "label": "rank0",
+                    "compile_id": "[0/0]",
+                    "compile_dir": "-_0_0_0",
+                    "log_file": "dedicated_log_torch_trace_rank_0_aaaa.log",
+                    "rank": 0,
+                },
+                {
+                    "id": "prov-2",
+                    "label": "rank1",
+                    "compile_id": "[0/0]",
+                    "compile_dir": "-_0_0_0",
+                    "log_file": "dedicated_log_torch_trace_rank_1_bbbb.log",
+                    "rank": 1,
+                },
+            ],
+        )
+        self.assertIn("rank0", html)
+        self.assertNotIn("rank1", html)
 
     def test_check_health_ignores_proxy_environment_for_local_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

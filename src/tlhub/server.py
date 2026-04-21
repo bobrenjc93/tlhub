@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import difflib
 import html
 from http import HTTPStatus
@@ -2078,6 +2079,155 @@ def render_run_tree(
     return f"<ul class='tree tree-root'>{''.join(items)}</ul>"
 
 
+def compile_entry_route_key(compile_entry: dict[str, Any]) -> str:
+    return str(
+        compile_entry.get("entry_id")
+        or compile_entry.get("compile_dir")
+        or compile_entry.get("compile_id")
+        or ""
+    )
+
+
+def compile_entry_url(run_id: str, compile_entry: dict[str, Any]) -> str:
+    return app_url(
+        "/runs/" + quote(run_id) + "/compiles/" + quote(compile_entry_route_key(compile_entry), safe="")
+    )
+
+
+def compile_entry_matches_scope(compile_entry: dict[str, Any], scope: dict[str, Any]) -> bool:
+    if compile_entry.get("log_file") and scope.get("log_file"):
+        if compile_entry.get("log_file") != scope.get("log_file"):
+            return False
+    if compile_entry.get("rank") is not None and scope.get("rank") is not None:
+        if compile_entry.get("rank") != scope.get("rank"):
+            return False
+
+    compile_dir = compile_entry.get("compile_dir")
+    scope_compile_dir = scope.get("compile_dir")
+    if compile_dir and scope_compile_dir:
+        return compile_dir == scope_compile_dir
+
+    compile_id = compile_entry.get("compile_id")
+    scope_compile_id = scope.get("compile_id")
+    if compile_id and scope_compile_id:
+        return compile_id == scope_compile_id
+    return False
+
+
+def find_compile_entry(
+    manifest: dict[str, Any] | None,
+    *,
+    compile_key: str | None = None,
+    scope: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    compiles = (manifest or {}).get("compiles", []) or []
+    if compile_key:
+        for entry in compiles:
+            if compile_entry_route_key(entry) == compile_key:
+                return entry
+        for entry in compiles:
+            if str(entry.get("compile_dir") or "") == compile_key:
+                return entry
+    if scope is not None:
+        scoped_key = scope.get("compile_entry_id")
+        if scoped_key:
+            for entry in compiles:
+                if compile_entry_route_key(entry) == str(scoped_key):
+                    return entry
+        for entry in compiles:
+            if compile_entry_matches_scope(entry, scope):
+                return entry
+    return None
+
+
+def collect_run_log_files(
+    manifest: dict[str, Any],
+    compiles: list[dict[str, Any]],
+    primary_artifacts: list[dict[str, Any]],
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    has_unscoped = False
+
+    def add(log_file: str | None) -> None:
+        nonlocal has_unscoped
+        value = str(log_file or "")
+        if not value:
+            has_unscoped = True
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        ordered.append(value)
+
+    for log_file in manifest.get("log_files", []) or []:
+        add(log_file)
+    for compile_entry in compiles:
+        add(compile_entry.get("log_file"))
+    for artifact in primary_artifacts:
+        add(artifact.get("log_file"))
+
+    if has_unscoped:
+        ordered.append("")
+    return ordered
+
+
+def render_log_tree_node(
+    run_id: str,
+    log_file: str,
+    compile_entries: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+) -> str:
+    children: list[str] = []
+    for compile_entry in compile_entries:
+        children.append(render_compile_tree_node(run_id, compile_entry))
+    if artifacts:
+        children.append(
+            render_artifact_group(
+                "Other",
+                artifacts,
+                group_key=f"log:{run_id}:{log_file or 'unscoped'}:other",
+            )
+        )
+
+    ranks = sorted(
+        {
+            rank
+            for rank in (
+                *(entry.get("rank") for entry in compile_entries),
+                *(artifact.get("rank") for artifact in artifacts),
+            )
+            if rank is not None
+        }
+    )
+    artifact_count = sum(len(entry.get("artifacts") or []) for entry in compile_entries) + len(artifacts)
+    meta_bits = []
+    if len(ranks) == 1:
+        meta_bits.append(f"rank {ranks[0]}")
+    elif len(ranks) > 1:
+        meta_bits.append(f"{len(ranks)} ranks")
+    meta_bits.append(f"{len(compile_entries)}c")
+    meta_bits.append(f"{artifact_count}f")
+    label = Path(log_file).name if log_file else "Unscoped artifacts"
+    tree_key = f"log:{run_id}:{log_file or 'unscoped'}"
+    children_html = "".join(children) or "<li class='tree-empty muted'>No indexed artifacts.</li>"
+    return f"""
+    <li class="tree-node node-log" data-tree-node>
+      <div class="tree-row">
+        <button type="button" class="tree-toggle" data-tree-key="{escape(tree_key)}" aria-expanded="false">
+          <span class="tree-caret" aria-hidden="true"></span>
+        </button>
+        <span class="tree-label tree-label-static" title="{escape(log_file or 'Artifacts without a source log file')}">
+          <span class="tree-icon" aria-hidden="true">&#128220;</span>
+          <span class="tree-name mono">{escape(label)}</span>
+          <span class="tree-meta muted">{escape(' · '.join(meta_bits))}</span>
+        </span>
+      </div>
+      <ul class="tree-children">{children_html}</ul>
+    </li>
+    """
+
+
 def render_run_tree_node(
     repo: Repository,
     paths: TLHubPaths,
@@ -2090,19 +2240,44 @@ def render_run_tree_node(
     artifact_by_id = {artifact["id"]: artifact for artifact in artifacts}
     report_ids = set(manifest.get("report_artifact_ids", []) or [])
     compiles = manifest.get("compiles", [])
+    primary_artifacts = [artifact for artifact in artifacts if artifact["id"] not in report_ids]
+    compile_artifact_ids = {
+        artifact["id"]
+        for compile_entry in compiles
+        for artifact in (compile_entry.get("artifacts") or [])
+    }
 
     compile_nodes = []
-    seen_artifact_ids: set[str] = set()
-    for compile_entry in compiles:
-        compile_nodes.append(render_compile_tree_node(run_id, compile_entry, seen_artifact_ids))
+    log_files = collect_run_log_files(manifest, compiles, primary_artifacts)
+    if len(log_files) > 1 and (not compiles or all(compile_entry.get("log_file") for compile_entry in compiles)):
+        compiles_by_log: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        leftover_by_log: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for compile_entry in compiles:
+            compiles_by_log[str(compile_entry.get("log_file") or "")].append(compile_entry)
+        for artifact in primary_artifacts:
+            if artifact["id"] in compile_artifact_ids:
+                continue
+            leftover_by_log[str(artifact.get("log_file") or "")].append(artifact)
+        for log_file in log_files:
+            compile_nodes.append(
+                render_log_tree_node(
+                    run_id,
+                    log_file,
+                    compiles_by_log.get(log_file, []),
+                    leftover_by_log.get(log_file, []),
+                )
+            )
+    else:
+        for compile_entry in compiles:
+            compile_nodes.append(render_compile_tree_node(run_id, compile_entry))
 
-    leftover = [
-        artifact
-        for artifact in artifacts
-        if artifact["id"] not in seen_artifact_ids and artifact["id"] not in report_ids
-    ]
-    if leftover:
-        compile_nodes.append(render_artifact_group("Other", leftover, group_key=f"run:{run_id}:other"))
+        leftover = [
+            artifact
+            for artifact in primary_artifacts
+            if artifact["id"] not in compile_artifact_ids
+        ]
+        if leftover:
+            compile_nodes.append(render_artifact_group("Other", leftover, group_key=f"run:{run_id}:other"))
 
     reports = [artifact_by_id[aid] for aid in report_ids if aid in artifact_by_id]
     if reports:
@@ -2148,21 +2323,19 @@ def render_run_tree_node(
 def render_compile_tree_node(
     run_id: str,
     compile_entry: dict[str, Any],
-    seen_artifact_ids: set[str],
 ) -> str:
     compile_dir = compile_entry.get("compile_dir") or ""
     compile_id = compile_entry.get("compile_id") or compile_dir
     artifacts = compile_entry.get("artifacts") or []
     status = compile_entry.get("status", "missing")
-    for artifact in artifacts:
-        seen_artifact_ids.add(artifact["id"])
     leaves = "".join(render_artifact_leaf(artifact) for artifact in artifacts)
     leaves_html = leaves or "<li class='tree-empty muted'>No artifacts.</li>"
-    compile_link = app_url("/runs/" + quote(run_id) + "/compiles/" + quote(compile_dir))
+    compile_key = compile_entry_route_key(compile_entry)
+    compile_link = compile_entry_url(run_id, compile_entry)
     return f"""
     <li class="tree-node node-compile" data-tree-node>
       <div class="tree-row">
-        <button type="button" class="tree-toggle" data-tree-key="compile:{escape(run_id)}:{escape(compile_dir)}" aria-expanded="false">
+        <button type="button" class="tree-toggle" data-tree-key="compile:{escape(run_id)}:{escape(compile_key)}" aria-expanded="false">
           <span class="tree-caret" aria-hidden="true"></span>
         </button>
         <a class="tree-label" href="{compile_link}">
@@ -2483,6 +2656,7 @@ def render_artifact(repo: Repository, paths: TLHubPaths, artifact_id: str) -> st
 
     run = repo.get_run(artifact["run_id"])
     assert run is not None
+    manifest = load_run_manifest(paths, run["id"])
     content = read_artifact_text(paths, artifact)
     line_count = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
     byte_count = len(content.encode("utf-8"))
@@ -2493,12 +2667,17 @@ def render_artifact(repo: Repository, paths: TLHubPaths, artifact_id: str) -> st
         "/compare",
         query={"left_run": artifact["run_id"], "family": artifact["family"]},
     )
-    compile_id = artifact.get("compile_id")
-    compile_link = (
-        f"<a href='{app_url('/runs/' + quote(run['id']) + '/compiles/' + quote(compile_id))}'>{escape(compile_id)}</a>"
-        if compile_id
-        else "<span class='muted'>n/a</span>"
-    )
+    compile_entry = find_compile_entry(manifest, scope=artifact)
+    compile_id = artifact.get("compile_id") or (compile_entry or {}).get("compile_id")
+    if compile_entry is not None:
+        compile_link = f"<a href='{compile_entry_url(run['id'], compile_entry)}'>{escape(str(compile_id))}</a>"
+    elif artifact.get("compile_dir"):
+        compile_link = (
+            f"<a href='{app_url('/runs/' + quote(run['id']) + '/compiles/' + quote(str(artifact['compile_dir']), safe=''))}'>"
+            f"{escape(str(compile_id or artifact['compile_dir']))}</a>"
+        )
+    else:
+        compile_link = "<span class='muted'>n/a</span>"
     filename = artifact["relative_path"].split("/")[-1]
 
     actions = (
@@ -2697,10 +2876,7 @@ def render_compile_detail(
     if run is None or manifest is None:
         return page("Compile not found", "<div class='empty'>Run manifest is missing.</div>")
 
-    compile_entry = next(
-        (entry for entry in manifest.get("compiles", []) if entry.get("compile_dir") == compile_key),
-        None,
-    )
+    compile_entry = find_compile_entry(manifest, compile_key=compile_key)
     if compile_entry is None:
         return page("Compile not found", f"<div class='empty'>Compile <code>{escape(compile_key)}</code> was not found.</div>")
 
@@ -2773,6 +2949,7 @@ def render_compile_detail(
             <div><span class="muted">Python frame</span><span class="mono">{escape(str(metrics.get('co_filename') or 'n/a'))}</span></div>
             <div><span class="muted">Function</span><span class="mono">{escape(str(metrics.get('co_name') or 'n/a'))}</span></div>
             <div><span class="muted">Line</span><span class="mono">{escape(str(metrics.get('co_firstlineno') or 'n/a'))}</span></div>
+            <div><span class="muted">Log file</span><span class="mono">{escape(str(compile_entry.get('log_file') or 'n/a'))}</span></div>
           </div>
         </div>
         <div class="panel">
@@ -2902,13 +3079,16 @@ def render_guard_detail(paths: TLHubPaths, run_id: str, guard_id: str) -> str:
     )
     if guard is None:
         return page("Guard not found", f"<div class='empty'>Guard <code>{escape(guard_id)}</code> was not found.</div>")
+    compile_entry = find_compile_entry(manifest, scope=guard)
+    compile_href = compile_entry_url(run_id, compile_entry) if compile_entry is not None else app_url("/runs/" + quote(run_id))
+    compile_label = escape(str(guard.get("compile_id") or "compile"))
 
     body = f"""
     <header class="shell">
       <div class="title">
         <div>
           <h1>{escape(guard.get('failure_type') or 'Guard detail')}</h1>
-          <p><a href="{app_url('/runs/' + quote(run_id))}">Run {escape(run_id)}</a> | <a href="{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(guard.get('compile_dir') or ''))}">{escape(guard.get('compile_id') or 'compile')}</a></p>
+          <p><a href="{app_url('/runs/' + quote(run_id))}">Run {escape(run_id)}</a> | <a href="{compile_href}">{compile_label}</a></p>
         </div>
         <div class="actions">
           <a href="{app_url('/runs/' + quote(run_id))}">Back to run</a>
@@ -3123,6 +3303,7 @@ def render_provenance_detail(
           {render_metrics_list(mapping_counts)}
           <div class="summary-list" style="margin-top:1rem;">
             <div><span class="muted">Rank</span><span class="mono">{escape(str(group.get('rank') if group.get('rank') is not None else 'n/a'))}</span></div>
+            <div><span class="muted">Log file</span><span class="mono">{escape(str(group.get('log_file') or 'n/a'))}</span></div>
             <div><span class="muted">Node mappings</span><span>{render_provenance_artifact_link(mapping_artifact, 'Open artifact')}</span></div>
             <div><span class="muted">Code mode</span><span class="mono">{escape(code_mode)}</span></div>
           </div>
@@ -3227,7 +3408,7 @@ def render_compile_table(run_id: str, compiles: list[dict[str, Any]]) -> str:
         rows.append(
             f"""
             <tr>
-              <td class="mono"><a href="{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(compile_entry['compile_dir']))}">{escape(compile_entry['compile_id'])}</a></td>
+              <td class="mono"><a href="{compile_entry_url(run_id, compile_entry)}">{escape(compile_entry['compile_id'])}</a></td>
               <td>{'' if compile_entry.get('rank') is None else compile_entry['rank']}</td>
               <td>{render_compile_status(compile_entry.get('status', 'missing'))}</td>
               <td>{compile_entry.get('artifact_count', 0)}</td>
@@ -3527,7 +3708,7 @@ def render_ir_dumps_panel(run_id: str, compiles: list[dict[str, Any]]) -> str:
                 for artifact in artifacts
             ) + "</ul>"
         )
-        compile_link = app_url("/runs/" + quote(run_id) + "/compiles/" + quote(compile_dir))
+        compile_link = compile_entry_url(run_id, compile_entry)
         items.append(
             f"""
             <li class="ir-compile">
@@ -3580,6 +3761,7 @@ def build_stack_tree(compiles: list[dict[str, Any]]) -> dict[str, Any]:
             node = child
         node.setdefault("compiles", []).append(
             {
+                "entry_id": compile_entry.get("entry_id"),
                 "compile_id": compile_entry["compile_id"],
                 "compile_dir": compile_entry["compile_dir"],
                 "status": compile_entry.get("status", "missing"),
@@ -3593,7 +3775,7 @@ def render_stack_tree_children(run_id: str, children: dict[str, Any]) -> str:
     for child in children.values():
         frame_html = render_frame_label(child["frame"])
         compile_links = "".join(
-            f" <a class='pill {status_class(item.get('status'))}' href='{app_url('/runs/' + quote(run_id) + '/compiles/' + quote(item['compile_dir']))}'>{escape(item['compile_id'])}</a>"
+            f" <a class='pill {status_class(item.get('status'))}' href='{compile_entry_url(run_id, item)}'>{escape(item['compile_id'])}</a>"
             for item in child.get("compiles", [])
         )
         nested = render_stack_tree_children(run_id, child.get("children", {}))
@@ -3682,14 +3864,7 @@ def render_compile_provenance_links(
     matches = [
         group
         for group in provenance_groups
-        if (
-            compile_entry.get("compile_dir")
-            and group.get("compile_dir") == compile_entry.get("compile_dir")
-        )
-        or (
-            compile_entry.get("compile_id")
-            and group.get("compile_id") == compile_entry.get("compile_id")
-        )
+        if compile_entry_matches_scope(compile_entry, group)
     ]
     if not matches:
         return ""

@@ -104,6 +104,7 @@ def build_provenance_groups(artifacts: list[dict[str, Any]]) -> list[dict[str, A
             {
                 "id": f"prov-{len(groups) + 1:04d}",
                 "label": label,
+                "log_file": mapping.get("log_file"),
                 "rank": mapping.get("rank"),
                 "compile_id": mapping.get("compile_id"),
                 "compile_dir": mapping.get("compile_dir"),
@@ -261,9 +262,10 @@ def _artifact_sort_key(artifact: dict[str, Any]) -> tuple[Any, ...]:
 
 def _artifact_scope(artifact: dict[str, Any]) -> tuple[Any, Any] | None:
     compile_key = artifact.get("compile_dir") or artifact.get("compile_id")
-    if compile_key is None and artifact.get("rank") is None:
+    log_file = artifact.get("log_file")
+    if compile_key is None and artifact.get("rank") is None and not log_file:
         return None
-    return (artifact.get("rank"), compile_key)
+    return (artifact.get("rank"), compile_key, log_file)
 
 
 def _select_nearest_artifact(

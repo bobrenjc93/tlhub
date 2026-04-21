@@ -421,8 +421,10 @@ class TraceIngestor:
             self.failures_and_restarts.append(
                 {
                     "kind": "restart",
+                    "compile_entry_id": compile_entry["entry_id"],
                     "compile_id": compile_entry["compile_id"],
                     "compile_dir": compile_entry["compile_dir"],
+                    "log_file": compile_entry["log_file"],
                     "rank": compile_entry["rank"],
                     "failure_type": "RestartAnalysis",
                     "reason": str(reason),
@@ -438,8 +440,10 @@ class TraceIngestor:
             self.failures_and_restarts.append(
                 {
                     "kind": "failure",
+                    "compile_entry_id": compile_entry["entry_id"],
                     "compile_id": compile_entry["compile_id"],
                     "compile_dir": compile_entry["compile_dir"],
+                    "log_file": compile_entry["log_file"],
                     "rank": compile_entry["rank"],
                     "failure_type": str(metrics.get("fail_type")),
                     "reason": str(metrics.get("fail_reason") or ""),
@@ -455,22 +459,30 @@ class TraceIngestor:
         failure_type: str,
         reason: str,
     ) -> None:
-        detail = self.build_guard_detail(event, failure_type)
+        detail = self.build_guard_detail(event, failure_type, compile_entry=compile_entry)
         self.guard_details.append(detail)
         self.export_failures.append(
             {
                 "failure_type": failure_type,
                 "reason": reason,
                 "detail_id": detail["id"],
+                "compile_entry_id": detail.get("compile_entry_id"),
                 "compile_id": event.compile_id,
                 "compile_dir": event.compile_dir,
+                "log_file": event.log_file,
                 "rank": event.rank,
             }
         )
         if compile_entry is not None:
             compile_entry["export_guards"].append(detail["id"])
 
-    def build_guard_detail(self, event: ParsedEvent, failure_type: str) -> dict[str, Any]:
+    def build_guard_detail(
+        self,
+        event: ParsedEvent,
+        failure_type: str,
+        *,
+        compile_entry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         metadata = (
             event.envelope.get("guard_added")
             or event.envelope.get("propagate_real_tensors_provenance")
@@ -483,6 +495,8 @@ class TraceIngestor:
             "failure_type": failure_type,
             "compile_id": event.compile_id,
             "compile_dir": event.compile_dir,
+            "compile_entry_id": compile_entry.get("entry_id") if compile_entry is not None else None,
+            "log_file": compile_entry.get("log_file") if compile_entry is not None else event.log_file,
             "rank": event.rank,
             "expr": metadata.get("expr"),
             "result": metadata.get("result"),
@@ -681,12 +695,19 @@ class TraceIngestor:
     def get_compile_entry(self, event: ParsedEvent) -> dict[str, Any] | None:
         if event.compile_dir is None and event.compile_id is None:
             return None
-        key = event.compile_dir or f"unknown_{event.log_line_no}"
+        key = build_compile_entry_id(
+            event.log_file,
+            event.rank,
+            event.compile_dir,
+            fallback_line=event.log_line_no,
+        )
         if key not in self.compiles:
             self.compiles[key] = {
                 "key": key,
-                "compile_dir": key,
+                "entry_id": key,
+                "compile_dir": event.compile_dir or f"unknown_{event.log_line_no}",
                 "compile_id": event.compile_id or f"(unknown @ line {event.log_line_no})",
+                "log_file": event.log_file,
                 "rank": event.rank,
                 "first_line": event.log_line_no,
                 "last_line": event.log_line_no,
@@ -716,8 +737,12 @@ class TraceIngestor:
         entry["last_line"] = max(entry["last_line"], event.log_line_no)
         if entry["rank"] is None:
             entry["rank"] = event.rank
+        if not entry.get("log_file"):
+            entry["log_file"] = event.log_file
         if entry["compile_id"].startswith("(unknown") and event.compile_id is not None:
             entry["compile_id"] = event.compile_id
+        if entry["compile_dir"].startswith("unknown_") and event.compile_dir is not None:
+            entry["compile_dir"] = event.compile_dir
         return entry
 
     def build_event_relative_path(self, event: ParsedEvent, plan: ArtifactPlan) -> Path:
@@ -1071,6 +1096,7 @@ class TraceIngestor:
             self.compiles.values(),
             key=lambda entry: (
                 entry["rank"] if entry["rank"] is not None else -1,
+                entry.get("log_file") or "",
                 entry["first_line"],
                 entry["compile_id"],
             ),
@@ -1254,6 +1280,19 @@ def extract_compile_identity(envelope: dict[str, Any]) -> tuple[str | None, str 
     display += "]"
     directory = f"{compiled_text}_{frame_text}_{compile_text}_{attempt_text}"
     return display, directory
+
+
+def build_compile_entry_id(
+    log_file: str,
+    rank: int | None,
+    compile_dir: str | None,
+    *,
+    fallback_line: int,
+) -> str:
+    base = compile_dir or f"unknown_{fallback_line}"
+    digest = hashlib.sha1(f"{log_file}\0{rank}\0{base}".encode("utf-8")).hexdigest()[:10]
+    rank_text = f"rank_{rank}" if rank is not None else "rank_unknown"
+    return f"{rank_text}_{digest}_{base}"
 
 
 def build_artifact_plan(event: ParsedEvent) -> ArtifactPlan | None:
