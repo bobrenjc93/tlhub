@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tlhub import cli  # noqa: E402
-from tlhub.config import BASE_URL_ENV, build_app_url, build_user_url, get_paths  # noqa: E402
+from tlhub.config import BASE_URL_ENV, DEFAULT_PORT, build_app_url, build_user_url, get_paths  # noqa: E402
 from tlhub.database import Repository, RunCreate  # noqa: E402
 from tlhub import server  # noqa: E402
 from tlhub.trace_parser import ingest_trace_dir  # noqa: E402
@@ -96,6 +96,10 @@ def run_http_server(paths, repo):
 
 
 class TLHubTests(unittest.TestCase):
+    def test_cli_parser_defaults_to_port_44107(self) -> None:
+        self.assertEqual(DEFAULT_PORT, 44107)
+        self.assertEqual(cli.build_parser().parse_args([]).port, 44107)
+
     def test_build_user_url_uses_base_url_host_path_and_runtime_port(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -371,6 +375,27 @@ class TLHubTests(unittest.TestCase):
         self.assertIn("failed to start tlhub daemon: daemon process exited with code 1", message)
         self.assertIn(str(paths.daemon_log_path), message)
         self.assertIn("RuntimeError: bind failed", message)
+
+    def test_check_health_ignores_proxy_environment_for_local_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                repo = Repository(paths)
+                with run_http_server(paths, repo) as httpd:
+                    host, port = httpd.server_address
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "HTTP_PROXY": "http://127.0.0.1:9",
+                            "http_proxy": "http://127.0.0.1:9",
+                            "HTTPS_PROXY": "http://127.0.0.1:9",
+                            "https_proxy": "http://127.0.0.1:9",
+                            "NO_PROXY": "",
+                            "no_proxy": "",
+                        },
+                        clear=False,
+                    ):
+                        self.assertTrue(cli.check_health(f"http://{host}:{port}"))
 
     def test_cli_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

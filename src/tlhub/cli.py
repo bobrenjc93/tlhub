@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+import http.client
 import os
 from pathlib import Path
 import shlex
@@ -12,9 +13,7 @@ import subprocess
 import sys
 import time
 from typing import Sequence
-from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import urlopen
 import uuid
 import webbrowser
 
@@ -352,11 +351,23 @@ def terminate_subprocess(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) 
 
 
 def check_health(base_url: str) -> bool:
-    try:
-        with urlopen(f"{base_url}/healthz", timeout=0.25) as response:
-            return response.status == 200
-    except (OSError, URLError):
+    split = urlsplit(base_url)
+    if split.hostname is None or split.port is None:
         return False
+    path = (split.path.rstrip("/") + "/healthz") if split.path else "/healthz"
+    connection_class = (
+        http.client.HTTPSConnection if split.scheme == "https" else http.client.HTTPConnection
+    )
+    conn = connection_class(split.hostname, split.port, timeout=0.25)
+    try:
+        conn.request("GET", path)
+        response = conn.getresponse()
+        response.read()
+        return response.status == 200
+    except OSError:
+        return False
+    finally:
+        conn.close()
 
 
 def read_log_tail(path: Path, *, max_bytes: int = 16384, max_lines: int = 40) -> str | None:

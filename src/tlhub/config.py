@@ -8,7 +8,7 @@ from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 9234
+DEFAULT_PORT = 44107
 BASE_URL_ENV = "BASE_URL"
 
 
