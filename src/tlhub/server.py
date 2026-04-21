@@ -3100,6 +3100,7 @@ def render_provenance_detail(
         if extra_artifacts
         else "<li class='muted'>No supplemental provenance artifacts.</li>"
     )
+    interactive_mappings_json = json.dumps(interactive_mappings, sort_keys=True).replace("</", "<\\/")
 
     body = f"""
     <header class="shell">
@@ -3115,7 +3116,7 @@ def render_provenance_detail(
     </header>
     <main class="stack">
       <style>{PROVENANCE_STYLE}</style>
-      <script id="provenanceMappings" type="application/json">{json.dumps(interactive_mappings, sort_keys=True).replace("</", "<\\/")}</script>
+      <script id="provenanceMappings" type="application/json">{interactive_mappings_json}</script>
       <div class="grid-2">
         <div class="panel">
           <h2>Mapping summary</h2>
