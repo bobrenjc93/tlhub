@@ -1004,6 +1004,43 @@ pre.unified {
   flex: 0 0 auto;
   color: var(--muted);
 }
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 12rem;
+  padding: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffdf8;
+  box-shadow: 0 20px 40px rgba(73, 45, 20, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.ctx-menu[hidden] { display: none; }
+.ctx-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.45rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-item:hover { background: rgba(191, 153, 121, 0.16); }
+.ctx-item.ctx-danger { color: var(--bad); }
+.ctx-item.ctx-danger:hover { background: rgba(143, 47, 29, 0.12); }
+.ctx-hint { color: var(--muted); font-size: 0.76rem; }
+.tree-node.node-run.ctx-target > .tree-row {
+  outline: 2px solid rgba(182, 84, 31, 0.5);
+  outline-offset: 2px;
+}
 .workspace-resizer {
   position: sticky;
   top: 0;
@@ -1452,6 +1489,101 @@ HASH_OPEN_SCRIPT = """
 """
 
 
+CTX_MENU_SCRIPT = """
+(() => {
+  const menu = document.querySelector('[data-ctx-menu]');
+  if (!menu) return;
+  const base = (window.TLHUB_APP_BASE || '').replace(/\\/$/, '');
+  let targetRunId = null;
+  let targetNode = null;
+
+  const hide = () => {
+    menu.hidden = true;
+    if (targetNode) targetNode.classList.remove('ctx-target');
+    targetRunId = null;
+    targetNode = null;
+  };
+
+  const show = (x, y, node, runId) => {
+    hide();
+    targetRunId = runId;
+    targetNode = node;
+    node.classList.add('ctx-target');
+    menu.hidden = false;
+    const rect = menu.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const left = Math.min(x, vw - rect.width - 8);
+    const top = Math.min(y, vh - rect.height - 8);
+    menu.style.left = Math.max(4, left) + 'px';
+    menu.style.top = Math.max(4, top) + 'px';
+  };
+
+  document.addEventListener('contextmenu', (event) => {
+    const node = event.target.closest('.tree-node.node-run');
+    if (!node) { hide(); return; }
+    const runId = node.dataset.runId;
+    if (!runId) return;
+    event.preventDefault();
+    show(event.clientX, event.clientY, node, runId);
+  });
+
+  document.addEventListener('click', (event) => {
+    if (menu.hidden) return;
+    if (!menu.contains(event.target)) hide();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') hide();
+  });
+  window.addEventListener('scroll', hide, { passive: true, capture: true });
+  window.addEventListener('resize', hide);
+
+  menu.addEventListener('click', async (event) => {
+    const btn = event.target.closest('[data-ctx-action]');
+    if (!btn) return;
+    event.stopPropagation();
+    const action = btn.dataset.ctxAction;
+    const runId = targetRunId;
+    const node = targetNode;
+    hide();
+    if (action === 'delete-run' && runId) {
+      const confirmed = window.confirm(`Delete run ${runId}?\\n\\nThis removes the database entry and trace files on disk.`);
+      if (!confirmed) return;
+      try {
+        const url = `${base}/runs/${encodeURIComponent(runId)}/delete`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Accept': 'text/html' },
+          redirect: 'manual',
+        });
+        const ok = response.ok || response.status === 0 || response.type === 'opaqueredirect';
+        if (!ok && response.status !== 303) {
+          throw new Error(`Server returned ${response.status}`);
+        }
+        // Drop the selection entries tied to this run.
+        try {
+          const SELECT_KEY = 'tlhub.compareSelection';
+          const sel = JSON.parse(localStorage.getItem(SELECT_KEY) || '[]');
+          const remaining = sel.filter((id) => !node.querySelector(`input.tree-check[value="${id}"]`));
+          localStorage.setItem(SELECT_KEY, JSON.stringify(remaining));
+        } catch (_e) {}
+        const current = window.location.pathname || '';
+        if (current.includes(`/runs/${runId}`) || current.includes(`/artifacts/`)) {
+          window.location.href = base + '/';
+        } else if (node && node.parentNode) {
+          node.parentNode.removeChild(node);
+        } else {
+          window.location.reload();
+        }
+      } catch (err) {
+        alert(`Failed to delete run: ${err.message || err}`);
+      }
+    }
+  });
+})();
+"""
+
+
 SIDEBAR_TREE_SCRIPT = """
 (() => {
   const sidebar = document.querySelector('.sidebar-inner');
@@ -1877,6 +2009,7 @@ def render_workspace_page(
     <script>{HASH_OPEN_SCRIPT}</script>
     <script>{COPY_BUTTON_SCRIPT}</script>
     <script>{SIDEBAR_TREE_SCRIPT}</script>
+    <script>{CTX_MENU_SCRIPT}</script>
     """
     return page(page_title, body)
 
@@ -1923,6 +2056,12 @@ def render_workspace_sidebar(
           <button type="button" class="compare-btn compare-btn-ghost" data-compare-clear>Clear</button>
         </div>
       </div>
+    </div>
+    <div class="ctx-menu" data-ctx-menu role="menu" hidden>
+      <button type="button" class="ctx-item ctx-danger" data-ctx-action="delete-run" role="menuitem">
+        <span>Delete run</span>
+        <span class="ctx-hint">and remove trace files</span>
+      </button>
     </div>
     """
 

@@ -566,6 +566,39 @@ class TLHubTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertIn("Side-by-side diff", diff_html)
 
+    def test_http_post_delete_run_removes_repo_entry_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                repo = Repository(paths)
+                run_id = "delete-http"
+                trace_dir = paths.runs_dir / run_id / "trace"
+                artifacts_dir = paths.runs_dir / run_id / "artifacts"
+                trace_dir.mkdir(parents=True, exist_ok=True)
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+                log_text = emit_event(
+                    '"dynamo_output_graph": {}, "frame_id": 0, "frame_compile_id": 0, "attempt": 0',
+                    "graph():\n    %x = placeholder[target=x]\n    return x",
+                )
+                (trace_dir / "trace.log").write_text(log_text, encoding="utf-8")
+                index_run(repo, run_id, trace_dir, artifacts_dir)
+                self.assertIsNotNone(repo.get_run(run_id))
+                self.assertTrue((paths.runs_dir / run_id).exists())
+
+                with run_http_server(paths, repo) as httpd:
+                    host, port = httpd.server_address
+                    conn = http.client.HTTPConnection(host, port)
+                    conn.request("POST", f"/runs/{run_id}/delete")
+                    response = conn.getresponse()
+                    response.read()
+                    conn.close()
+
+                self.assertEqual(response.status, 303)
+                self.assertEqual(response.getheader("Location"), "/")
+                self.assertIsNone(repo.get_run(run_id))
+                self.assertFalse((paths.runs_dir / run_id).exists())
+
     def test_http_routes_support_base_url_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(
