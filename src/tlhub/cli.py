@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
@@ -28,6 +29,12 @@ from tlhub.config import (
 from tlhub.database import Repository, RunCreate
 from tlhub.server import run_daemon
 from tlhub.trace_parser import ParseResult, ingest_trace_dir
+
+
+@dataclass(frozen=True)
+class DaemonStartResult:
+    url: str | None = None
+    error: str | None = None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -184,46 +191,79 @@ def ensure_daemon_running(paths, *, preferred_port: int) -> str:
         if not stop_daemon(paths):
             fail("failed to restart existing tlhub daemon; try `tlhub --stop` and retry")
 
-    url = start_daemon(paths, preferred_port=preferred_port)
-    if url is None:
-        fail("failed to start tlhub daemon; check the daemon log for details")
-    return build_public_url(url)
+    result = start_daemon(paths, preferred_port=preferred_port)
+    if result.url is None:
+        fail(format_daemon_start_failure(paths, result.error))
+    return build_public_url(result.url)
 
 
-def start_daemon(paths, *, preferred_port: int) -> str | None:
-    url = spawn_daemon(paths, preferred_port)
-    if url or preferred_port == 0:
-        return url
-    return spawn_daemon(paths, 0)
+def start_daemon(paths, *, preferred_port: int) -> DaemonStartResult:
+    preferred = spawn_daemon(paths, preferred_port)
+    if preferred.url is not None or preferred_port == 0:
+        return preferred
 
-
-def spawn_daemon(paths, port: int) -> str | None:
-    cleanup_stale_daemon_files(paths)
-    with paths.daemon_log_path.open("ab") as daemon_log:
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tlhub",
-                "--serve-daemon",
-                "--host",
-                DEFAULT_HOST,
-                "--port",
-                str(port),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=daemon_log,
-            stderr=daemon_log,
-            start_new_session=True,
+    fallback = spawn_daemon(paths, 0)
+    if fallback.url is not None:
+        return fallback
+    if preferred.error and fallback.error and preferred.error != fallback.error:
+        return DaemonStartResult(
+            error=f"{preferred.error}; retry on a random port also failed: {fallback.error}"
         )
+    return DaemonStartResult(error=fallback.error or preferred.error)
+
+
+def spawn_daemon(paths, port: int) -> DaemonStartResult:
+    cleanup_stale_daemon_files(paths)
+    try:
+        with paths.daemon_log_path.open("ab") as daemon_log:
+            marker = (
+                f"\n=== tlhub daemon start attempt {iso_now()} "
+                f"(python={sys.executable}, port={port}) ===\n"
+            ).encode("utf-8")
+            daemon_log.write(marker)
+            daemon_log.flush()
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "tlhub",
+                    "--serve-daemon",
+                    "--host",
+                    DEFAULT_HOST,
+                    "--port",
+                    str(port),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=daemon_log,
+                stderr=daemon_log,
+                start_new_session=True,
+            )
+    except OSError as error:
+        return DaemonStartResult(error=f"could not launch daemon subprocess: {error}")
 
     deadline = time.time() + 10
     while time.time() < deadline:
         running, url = daemon_status(paths, cleanup_stale=False)
         if running and url:
-            return url
+            return DaemonStartResult(url=url)
+        exit_code = proc.poll()
+        if exit_code is not None:
+            cleanup_stale_daemon_files(paths)
+            return DaemonStartResult(error=f"daemon process exited with code {exit_code}")
         time.sleep(0.1)
-    return None
+
+    pid = read_int(paths.daemon_pid_path)
+    bound_port = read_int(paths.daemon_port_path)
+    terminate_subprocess(proc)
+    cleanup_stale_daemon_files(paths)
+
+    details = []
+    if pid is not None:
+        details.append(f"pid {pid}")
+    if bound_port is not None:
+        details.append(f"port {bound_port}")
+    suffix = f" ({', '.join(details)})" if details else ""
+    return DaemonStartResult(error=f"daemon did not become healthy within 10s{suffix}")
 
 
 def daemon_status(paths, *, cleanup_stale: bool = True) -> tuple[bool, str | None]:
@@ -291,12 +331,64 @@ def process_exists(pid: int) -> bool:
     return True
 
 
+def terminate_subprocess(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            return
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            return
+
+
 def check_health(base_url: str) -> bool:
     try:
         with urlopen(f"{base_url}/healthz", timeout=0.25) as response:
             return response.status == 200
     except (OSError, URLError):
         return False
+
+
+def read_log_tail(path: Path, *, max_bytes: int = 16384, max_lines: int = 40) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except FileNotFoundError:
+        return None
+
+    text = data.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    lines = text.splitlines()
+    return "\n".join(lines[-max_lines:])
+
+
+def format_daemon_start_failure(paths, error: str | None) -> str:
+    summary = error or "startup failed for an unknown reason"
+    lines = [
+        f"failed to start tlhub daemon: {summary}",
+        f"daemon log: {paths.daemon_log_path}",
+    ]
+    log_tail = read_log_tail(paths.daemon_log_path)
+    if log_tail is None:
+        lines.append("recent daemon log: <empty>")
+    else:
+        lines.append("recent daemon log:")
+        lines.extend(f"  {line}" for line in log_tail.splitlines())
+    return "\n".join(lines)
 
 
 def read_int(path: Path) -> int | None:

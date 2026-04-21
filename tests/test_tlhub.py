@@ -319,7 +319,7 @@ class TLHubTests(unittest.TestCase):
                         with mock.patch("tlhub.cli.stop_daemon", return_value=True) as stop_daemon:
                             with mock.patch(
                                 "tlhub.cli.start_daemon",
-                                return_value="http://127.0.0.1:9456",
+                                return_value=cli.DaemonStartResult(url="http://127.0.0.1:9456"),
                             ) as start_daemon:
                                 url = cli.ensure_daemon_running(paths, preferred_port=9234)
 
@@ -342,13 +342,35 @@ class TLHubTests(unittest.TestCase):
                         with mock.patch("tlhub.cli.stop_daemon", return_value=True) as stop_daemon:
                             with mock.patch(
                                 "tlhub.cli.start_daemon",
-                                return_value="http://127.0.0.1:9456",
+                                return_value=cli.DaemonStartResult(url="http://127.0.0.1:9456"),
                             ) as start_daemon:
                                 url = cli.ensure_daemon_running(paths, preferred_port=9234)
 
         self.assertEqual(url, "http://127.0.0.1:9456")
         stop_daemon.assert_called_once_with(paths)
         start_daemon.assert_called_once_with(paths, preferred_port=9234)
+
+    def test_ensure_daemon_running_includes_daemon_log_tail_on_start_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"TLHUB_HOME": tmpdir}, clear=False):
+                paths = get_paths()
+                paths.daemon_log_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.daemon_log_path.write_text(
+                    "Traceback (most recent call last):\nRuntimeError: bind failed\n",
+                    encoding="utf-8",
+                )
+                with mock.patch("tlhub.cli.daemon_status", return_value=(False, None)):
+                    with mock.patch(
+                        "tlhub.cli.start_daemon",
+                        return_value=cli.DaemonStartResult(error="daemon process exited with code 1"),
+                    ):
+                        with self.assertRaises(SystemExit) as raised:
+                            cli.ensure_daemon_running(paths, preferred_port=9234)
+
+        message = str(raised.exception)
+        self.assertIn("failed to start tlhub daemon: daemon process exited with code 1", message)
+        self.assertIn(str(paths.daemon_log_path), message)
+        self.assertIn("RuntimeError: bind failed", message)
 
     def test_cli_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
